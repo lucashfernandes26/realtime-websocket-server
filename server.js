@@ -12,7 +12,7 @@ if (!OPENAI_API_KEY ) {
   process.exit(1);
 }
 
-console.log('🚀 Realtime WebSocket Server v4 starting...');
+console.log('🚀 Realtime WebSocket Server v5 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 
@@ -69,6 +69,9 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       },
     });
 
+    let isInitialGreeting = true;
+    let greetingTimeout = null;
+
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected for stream ${streamSid}`);
       
@@ -79,13 +82,12 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       
       const conversationRules = `
 
-REGRAS IMPORTANTES DE CONVERSAÇÃO:
-1. Fale frases CURTAS (máximo 2 frases por vez)
-2. SEMPRE faça uma pausa e espere a pessoa responder
-3. NUNCA fale mais de 15 segundos seguidos
-4. Se a pessoa não responder em 3 segundos, faça uma pergunta curta
-5. Seja DIRETO e OBJETIVO
-6. Quando fizer uma pergunta, PARE e ESPERE a resposta`;
+REGRAS DE CONVERSAÇÃO:
+1. Fale de forma natural e fluida
+2. Faça pausas naturais entre frases
+3. Quando fizer uma pergunta, espere a resposta
+4. Seja objetivo mas cordial
+5. NÃO repita a saudação inicial`;
       
       const fullInstructions = `${systemInstructions}${voiceInstructions ? `\n\nInstruções de voz: ${voiceInstructions}` : ''}${conversationRules}`;
       
@@ -102,12 +104,12 @@ REGRAS IMPORTANTES DE CONVERSAÇÃO:
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.25,
-            prefix_padding_ms: 150,
-            silence_duration_ms: 600,
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 700,
           },
-          temperature: 0.6,
-          max_response_output_tokens: 150,
+          temperature: 0.7,
+          max_response_output_tokens: 500,
         },
       };
 
@@ -119,11 +121,15 @@ REGRAS IMPORTANTES DE CONVERSAÇÃO:
           type: 'response.create',
           response: {
             modalities: ['text', 'audio'],
-            instructions: 'Cumprimente brevemente (máximo 10 palavras) e faça UMA pergunta curta. Depois PARE e espere a resposta.',
           },
         };
         openaiWs.send(JSON.stringify(responseCreate));
         console.log(`[OpenAI] Initial greeting requested`);
+        
+        greetingTimeout = setTimeout(() => {
+          isInitialGreeting = false;
+          console.log(`[OpenAI] Initial greeting phase ended, barge-in enabled`);
+        }, 5000);
       }, 500);
       
       resolve(openaiWs);
@@ -146,14 +152,27 @@ REGRAS IMPORTANTES DE CONVERSAÇÃO:
         }
         
         if (response.type === 'input_audio_buffer.speech_started') {
-          console.log(`[OpenAI] 🎤 User started speaking - interrupting AI`);
-          openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-          if (twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'clear',
-              streamSid: streamSid,
-            }));
+          if (isInitialGreeting) {
+            console.log(`[OpenAI] 🎤 User speaking during greeting - ignoring`);
+          } else {
+            console.log(`[OpenAI] 🎤 User started speaking - interrupting AI`);
+            openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
+            if (twilioWs.readyState === WebSocket.OPEN) {
+              twilioWs.send(JSON.stringify({
+                event: 'clear',
+                streamSid: streamSid,
+              }));
+            }
           }
+        }
+        
+        if (response.type === 'response.done') {
+          isInitialGreeting = false;
+          if (greetingTimeout) {
+            clearTimeout(greetingTimeout);
+            greetingTimeout = null;
+          }
+          console.log(`[OpenAI] Response completed, barge-in enabled`);
         }
         
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
@@ -195,6 +214,10 @@ REGRAS IMPORTANTES DE CONVERSAÇÃO:
 
     openaiWs.on('close', async () => {
       console.log(`[OpenAI] Connection closed for stream ${streamSid}`);
+      
+      if (greetingTimeout) {
+        clearTimeout(greetingTimeout);
+      }
       
       if (sessionData.transcription.length > 0 && callSid) {
         const transcriptionText = sessionData.transcription
@@ -298,7 +321,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '4.0.0',
+      version: '5.0.0',
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -306,7 +329,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v4\n');
+  res.end('Realtime WebSocket Server v5\n');
 });
 
 const wss = new WebSocketServer({ server });
