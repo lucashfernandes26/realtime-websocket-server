@@ -4,7 +4,7 @@ import { parse } from 'url';
 
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const API_BASE_URL = process.env.API_BASE_URL || 'https://agenteia-cjaa5fkz.manus.space';
+const API_BASE_URL = process.env.API_BASE_URL || 'https://https://zenix.group';
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
 if (!OPENAI_API_KEY ) {
