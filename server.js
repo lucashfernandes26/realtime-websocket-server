@@ -12,7 +12,7 @@ if (!OPENAI_API_KEY ) {
   process.exit(1);
 }
 
-console.log('🚀 Realtime WebSocket Server v3 starting...');
+console.log('🚀 Realtime WebSocket Server v4 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 
@@ -77,9 +77,17 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       
       const voiceInstructions = script?.voiceInstructions || '';
       
-      const fullInstructions = voiceInstructions 
-        ? `${systemInstructions}\n\nInstruções de voz: ${voiceInstructions}`
-        : systemInstructions;
+      const conversationRules = `
+
+REGRAS IMPORTANTES DE CONVERSAÇÃO:
+1. Fale frases CURTAS (máximo 2 frases por vez)
+2. SEMPRE faça uma pausa e espere a pessoa responder
+3. NUNCA fale mais de 15 segundos seguidos
+4. Se a pessoa não responder em 3 segundos, faça uma pergunta curta
+5. Seja DIRETO e OBJETIVO
+6. Quando fizer uma pergunta, PARE e ESPERE a resposta`;
+      
+      const fullInstructions = `${systemInstructions}${voiceInstructions ? `\n\nInstruções de voz: ${voiceInstructions}` : ''}${conversationRules}`;
       
       const sessionConfig = {
         type: 'session.update',
@@ -94,11 +102,12 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.3,
-            prefix_padding_ms: 200,
-            silence_duration_ms: 400,
+            threshold: 0.25,
+            prefix_padding_ms: 150,
+            silence_duration_ms: 600,
           },
-          temperature: 0.7,
+          temperature: 0.6,
+          max_response_output_tokens: 150,
         },
       };
 
@@ -110,7 +119,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
           type: 'response.create',
           response: {
             modalities: ['text', 'audio'],
-            instructions: 'Inicie a conversa seguindo EXATAMENTE as instruções do seu papel. Seja breve e natural.',
+            instructions: 'Cumprimente brevemente (máximo 10 palavras) e faça UMA pergunta curta. Depois PARE e espere a resposta.',
           },
         };
         openaiWs.send(JSON.stringify(responseCreate));
@@ -155,7 +164,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
               text: userText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[Transcription] User: ${userText.substring(0, 80)}...`);
+            console.log(`[Transcription] User: ${userText}`);
           }
         }
         
@@ -167,7 +176,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
               text: aiText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[Transcription] AI: ${aiText.substring(0, 80)}...`);
+            console.log(`[Transcription] AI: ${aiText}`);
           }
         }
         
@@ -289,7 +298,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '3.0.0',
+      version: '4.0.0',
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -297,7 +306,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v3\n');
+  res.end('Realtime WebSocket Server v4\n');
 });
 
 const wss = new WebSocketServer({ server });
