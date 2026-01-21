@@ -1,0 +1,17 @@
+{
+  "name": "realtime-websocket-server",
+  "version": "1.0.0",
+  "description": "Standalone WebSocket server for Twilio + OpenAI Realtime API integration",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "dotenv": "^16.4.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
