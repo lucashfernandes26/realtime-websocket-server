@@ -12,7 +12,7 @@ if (!OPENAI_API_KEY ) {
   process.exit(1);
 }
 
-console.log('🚀 Realtime WebSocket Server starting...');
+console.log('🚀 Realtime WebSocket Server v2 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 
@@ -29,7 +29,26 @@ async function fetchScript(scriptId) {
   }
 }
 
-function connectToOpenAI(twilioWs, streamSid, callSid, scriptId) {
+// Send transcription to API when call ends
+async function saveTranscription(callSid, scriptId, transcription) {
+  try {
+    console.log(`[Transcription] Saving transcription for call ${callSid}...`);
+    const response = await fetch(`${API_BASE_URL}/api/twilio/save-transcription`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callSid, scriptId, transcription }),
+    });
+    if (!response.ok) {
+      console.error(`[Transcription] Failed to save: HTTP ${response.status}`);
+    } else {
+      console.log(`[Transcription] ✅ Saved successfully for call ${callSid}`);
+    }
+  } catch (error) {
+    console.error(`[Transcription] Error saving:`, error.message);
+  }
+}
+
+function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
   return new Promise(async (resolve, reject) => {
     console.log(`[OpenAI] Connecting for stream ${streamSid}...`);
     
@@ -57,6 +76,9 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId) {
           voice: script?.voiceId || 'alloy',
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
+          input_audio_transcription: {
+            model: 'whisper-1',
+          },
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
@@ -101,6 +123,32 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId) {
           }
         }
         
+        // Capture user transcription
+        if (response.type === 'conversation.item.input_audio_transcription.completed') {
+          const userText = response.transcript || '';
+          if (userText.trim()) {
+            sessionData.transcription.push({
+              role: 'user',
+              text: userText,
+              timestamp: new Date().toISOString(),
+            });
+            console.log(`[Transcription] User: ${userText.substring(0, 50)}...`);
+          }
+        }
+        
+        // Capture AI response text
+        if (response.type === 'response.audio_transcript.done') {
+          const aiText = response.transcript || '';
+          if (aiText.trim()) {
+            sessionData.transcription.push({
+              role: 'assistant',
+              text: aiText,
+              timestamp: new Date().toISOString(),
+            });
+            console.log(`[Transcription] AI: ${aiText.substring(0, 50)}...`);
+          }
+        }
+        
         if (response.type === 'error') {
           console.error(`[OpenAI] Error:`, response.error);
         }
@@ -114,8 +162,15 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId) {
       reject(error);
     });
 
-    openaiWs.on('close', () => {
+    openaiWs.on('close', async () => {
       console.log(`[OpenAI] Connection closed for stream ${streamSid}`);
+      
+      if (sessionData.transcription.length > 0 && callSid) {
+        const transcriptionText = sessionData.transcription
+          .map(t => `[${t.role.toUpperCase()}]: ${t.text}`)
+          .join('\n');
+        await saveTranscription(callSid, scriptId, transcriptionText);
+      }
     });
   });
 }
@@ -124,6 +179,11 @@ function handleTwilioConnection(ws, req) {
   const { query } = parse(req.url, true);
   const callSid = query.callSid;
   const scriptId = query.scriptId;
+  
+  const sessionData = {
+    transcription: [],
+    startTime: new Date(),
+  };
   
   console.log('========================================');
   console.log('[Twilio] 🎤 New connection');
@@ -154,7 +214,7 @@ function handleTwilioConnection(ws, req) {
           console.log(`[Twilio] Script ID: ${actualScriptId || 'none'}`);
           
           try {
-            openaiWs = await connectToOpenAI(ws, streamSid, actualCallSid, actualScriptId);
+            openaiWs = await connectToOpenAI(ws, streamSid, actualCallSid, actualScriptId, sessionData);
             
             activeSessions.set(streamSid, {
               twilioWs: ws,
@@ -162,6 +222,7 @@ function handleTwilioConnection(ws, req) {
               streamSid,
               callSid: actualCallSid,
               scriptId: actualScriptId,
+              sessionData,
             });
           } catch (error) {
             console.error('[Twilio] ❌ Failed to connect to OpenAI:', error.message);
@@ -206,6 +267,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
+      version: '2.0.0',
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -213,7 +275,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server\n');
+  res.end('Realtime WebSocket Server v2\n');
 });
 
 const wss = new WebSocketServer({ server });
