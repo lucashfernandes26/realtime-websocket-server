@@ -12,7 +12,7 @@ if (!OPENAI_API_KEY ) {
   process.exit(1);
 }
 
-console.log('🚀 Realtime WebSocket Server v2 starting...');
+console.log('🚀 Realtime WebSocket Server v3 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 
@@ -29,7 +29,6 @@ async function fetchScript(scriptId) {
   }
 }
 
-// Send transcription to API when call ends
 async function saveTranscription(callSid, scriptId, transcription) {
   try {
     console.log(`[Transcription] Saving transcription for call ${callSid}...`);
@@ -55,7 +54,12 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let script = null;
     if (scriptId) {
       script = await fetchScript(scriptId);
-      if (!script) console.warn(`[OpenAI] Script ${scriptId} not found`);
+      if (script) {
+        console.log(`[OpenAI] Script loaded: ${script.name}`);
+        console.log(`[OpenAI] Voice: ${script.voiceId || 'alloy'}`);
+      } else {
+        console.warn(`[OpenAI] Script ${scriptId} not found, using defaults`);
+      }
     }
     
     const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
@@ -68,11 +72,20 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected for stream ${streamSid}`);
       
+      const systemInstructions = script?.systemPrompt || 
+        'Você é um assistente prestativo que fala português brasileiro de forma natural e amigável.';
+      
+      const voiceInstructions = script?.voiceInstructions || '';
+      
+      const fullInstructions = voiceInstructions 
+        ? `${systemInstructions}\n\nInstruções de voz: ${voiceInstructions}`
+        : systemInstructions;
+      
       const sessionConfig = {
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
-          instructions: script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro de forma natural e amigável.',
+          instructions: fullInstructions,
           voice: script?.voiceId || 'alloy',
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
@@ -81,11 +94,11 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 200,
+            threshold: 0.3,
+            prefix_padding_ms: 200,
+            silence_duration_ms: 400,
           },
-          temperature: 0.8,
+          temperature: 0.7,
         },
       };
 
@@ -97,7 +110,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
           type: 'response.create',
           response: {
             modalities: ['text', 'audio'],
-            instructions: 'Cumprimente o usuário de forma natural e breve, apresentando-se conforme seu papel.',
+            instructions: 'Inicie a conversa seguindo EXATAMENTE as instruções do seu papel. Seja breve e natural.',
           },
         };
         openaiWs.send(JSON.stringify(responseCreate));
@@ -123,7 +136,17 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
           }
         }
         
-        // Capture user transcription
+        if (response.type === 'input_audio_buffer.speech_started') {
+          console.log(`[OpenAI] 🎤 User started speaking - interrupting AI`);
+          openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
+          if (twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.send(JSON.stringify({
+              event: 'clear',
+              streamSid: streamSid,
+            }));
+          }
+        }
+        
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
           const userText = response.transcript || '';
           if (userText.trim()) {
@@ -132,11 +155,10 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
               text: userText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[Transcription] User: ${userText.substring(0, 50)}...`);
+            console.log(`[Transcription] User: ${userText.substring(0, 80)}...`);
           }
         }
         
-        // Capture AI response text
         if (response.type === 'response.audio_transcript.done') {
           const aiText = response.transcript || '';
           if (aiText.trim()) {
@@ -145,7 +167,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
               text: aiText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[Transcription] AI: ${aiText.substring(0, 50)}...`);
+            console.log(`[Transcription] AI: ${aiText.substring(0, 80)}...`);
           }
         }
         
@@ -267,7 +289,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '2.0.0',
+      version: '3.0.0',
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -275,7 +297,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v2\n');
+  res.end('Realtime WebSocket Server v3\n');
 });
 
 const wss = new WebSocketServer({ server });
