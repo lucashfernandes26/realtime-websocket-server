@@ -7,12 +7,12 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const API_BASE_URL = process.env.API_BASE_URL || 'https://zenix.group';
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
-if (!OPENAI_API_KEY ) {
+if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is required');
   process.exit(1);
 }
 
-console.log('🚀 Realtime WebSocket Server v5 starting...');
+console.log('🚀 Realtime WebSocket Server v5.1 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 
@@ -20,27 +20,27 @@ const activeSessions = new Map();
 
 async function fetchScript(scriptId) {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/scripts/${scriptId}`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const response = await fetch(`<LaTex>${API_BASE_URL}/api/scripts/$</LaTex>{scriptId}`);
+    if (!response.ok) throw new Error(`HTTP <LaTex>${response.status}`);
     return await response.json();
   } catch (error) {
-    console.error(`[Script] Failed to fetch script ${scriptId}:`, error.message);
+    console.error(`[Script] Failed to fetch script $</LaTex>{scriptId}:`, error.message);
     return null;
   }
 }
 
 async function saveTranscription(callSid, scriptId, transcription) {
   try {
-    console.log(`[Transcription] Saving transcription for call ${callSid}...`);
-    const response = await fetch(`${API_BASE_URL}/api/twilio/save-transcription`, {
+    console.log(`[Transcription] Saving transcription for call <LaTex>${callSid}...`);
+    const response = await fetch(`$</LaTex>{API_BASE_URL}/api/twilio/save-transcription`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ callSid, scriptId, transcription }),
     });
     if (!response.ok) {
-      console.error(`[Transcription] Failed to save: HTTP ${response.status}`);
+      console.error(`[Transcription] Failed to save: HTTP <LaTex>${response.status}`);
     } else {
-      console.log(`[Transcription] ✅ Saved successfully for call ${callSid}`);
+      console.log(`[Transcription] ✅ Saved successfully for call $</LaTex>{callSid}`);
     }
   } catch (error) {
     console.error(`[Transcription] Error saving:`, error.message);
@@ -49,22 +49,22 @@ async function saveTranscription(callSid, scriptId, transcription) {
 
 function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
   return new Promise(async (resolve, reject) => {
-    console.log(`[OpenAI] Connecting for stream ${streamSid}...`);
+    console.log(`[OpenAI] Connecting for stream <LaTex>${streamSid}...`);
     
     let script = null;
     if (scriptId) {
       script = await fetchScript(scriptId);
       if (script) {
-        console.log(`[OpenAI] Script loaded: ${script.name}`);
-        console.log(`[OpenAI] Voice: ${script.voiceId || 'alloy'}`);
+        console.log(`[OpenAI] Script loaded: $</LaTex>{script.name}`);
+        console.log(`[OpenAI] Voice: <LaTex>${script.voiceId || 'shimmer'}`);
       } else {
-        console.warn(`[OpenAI] Script ${scriptId} not found, using defaults`);
+        console.warn(`[OpenAI] Script $</LaTex>{scriptId} not found, using defaults`);
       }
     }
     
     const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Authorization': `Bearer <LaTex>${OPENAI_API_KEY}`,
         'OpenAI-Beta': 'realtime=v1',
       },
     });
@@ -73,7 +73,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let greetingTimeout = null;
 
     openaiWs.on('open', () => {
-      console.log(`[OpenAI] ✅ Connected for stream ${streamSid}`);
+      console.log(`[OpenAI] ✅ Connected for stream $</LaTex>{streamSid}`);
       
       const systemInstructions = script?.systemPrompt || 
         'Você é um assistente prestativo que fala português brasileiro de forma natural e amigável.';
@@ -89,14 +89,14 @@ REGRAS DE CONVERSAÇÃO:
 4. Seja objetivo mas cordial
 5. NÃO repita a saudação inicial`;
       
-      const fullInstructions = `${systemInstructions}${voiceInstructions ? `\n\nInstruções de voz: ${voiceInstructions}` : ''}${conversationRules}`;
+      const fullInstructions = `<LaTex>${systemInstructions}$</LaTex>{voiceInstructions ? `\n\nInstruções de voz: <LaTex>${voiceInstructions}` : ''}$</LaTex>{conversationRules}`;
       
       const sessionConfig = {
         type: 'session.update',
         session: {
           modalities: ['text', 'audio'],
           instructions: fullInstructions,
-          voice: script?.voiceId || 'alloy',
+          voice: script?.voiceId || 'shimmer',
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: {
@@ -221,7 +221,7 @@ REGRAS DE CONVERSAÇÃO:
       
       if (sessionData.transcription.length > 0 && callSid) {
         const transcriptionText = sessionData.transcription
-          .map(t => `[${t.role.toUpperCase()}]: ${t.text}`)
+          .map(t => `[<LaTex>${t.role.toUpperCase()}]: $</LaTex>{t.text}`)
           .join('\n');
         await saveTranscription(callSid, scriptId, transcriptionText);
       }
@@ -263,8 +263,8 @@ function handleTwilioConnection(ws, req) {
           const actualScriptId = data.start.customParameters?.scriptId || scriptId;
           
           console.log(`[Twilio] 🚀 Stream started`);
-          console.log(`[Twilio] Stream SID: ${streamSid}`);
-          console.log(`[Twilio] Call SID: ${actualCallSid}`);
+          console.log(`[Twilio] Stream SID: <LaTex>${streamSid}`);
+          console.log(`[Twilio] Call SID: $</LaTex>{actualCallSid}`);
           console.log(`[Twilio] Script ID: ${actualScriptId || 'none'}`);
           
           try {
@@ -321,7 +321,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '5.0.0',
+      version: '5.1.0',
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -329,7 +329,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v5\n');
+  res.end('Realtime WebSocket Server v5.1\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -347,9 +347,9 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🌐 WebSocket endpoint: ws://localhost:${PORT}/media-stream`);
-  console.log(`💚 Health check: http://localhost:${PORT}/health` );
+  console.log(`✅ Server running on port <LaTex>${PORT}`);
+  console.log(`🌐 WebSocket endpoint: ws://localhost:$</LaTex>{PORT}/media-stream`);
+  console.log(`💚 Health check: http://localhost:${PORT}/health`);
   console.log('========================================');
 });
 
