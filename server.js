@@ -16,7 +16,7 @@ if (!OPENAI_API_KEY ) {
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v9 starting...');
+console.log('🚀 Realtime WebSocket Server v10 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -52,7 +52,7 @@ async function saveTranscription(callSid, scriptId, transcription) {
 async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
   try {
     const startTime = Date.now();
-    console.log(`[ElevenLabs] Converting: "${text.substring(0, 50)}..."`);
+    console.log(`[ElevenLabs] Converting: "${text}"`);
     
     const response = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000&optimize_streaming_latency=4`,
@@ -125,14 +125,13 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       },
     });
 
-    let isInitialGreeting = true;
-    let greetingTimeout = null;
+    let waitingForUserResponse = false;
+    let userHasSpoken = false;
     let pendingTextResponse = '';
     let sentenceBuffer = '';
     let isProcessingSentence = false;
     let sentenceQueue = [];
     let isAISpeaking = false;
-    let questionAsked = false;
 
     async function processSentenceQueue() {
       if (isProcessingSentence || sentenceQueue.length === 0) return;
@@ -143,11 +142,6 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       
       if (sentence && sentence.trim()) {
         await textToSpeechElevenLabs(sentence, twilioWs, streamSid);
-        
-        if (sentence.includes('?')) {
-          questionAsked = true;
-          console.log(`[OpenAI] ❓ Question detected - waiting for user response`);
-        }
       }
       
       isProcessingSentence = false;
@@ -156,6 +150,8 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
         processSentenceQueue();
       } else {
         isAISpeaking = false;
+        console.log(`[State] AI finished speaking - now waiting for user`);
+        waitingForUserResponse = true;
       }
     }
 
@@ -171,30 +167,32 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       
       const conversationRules = `
 
-=== REGRAS DE CONVERSAÇÃO TELEFÔNICA ===
+=== REGRAS CRÍTICAS ===
 
-IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosamente:
+Você está em uma LIGAÇÃO TELEFÔNICA. Siga EXATAMENTE estas regras:
 
-1. FALE APENAS UMA FRASE OU PERGUNTA POR VEZ
-   - Após falar, PARE IMEDIATAMENTE e aguarde a resposta
-   - Nunca faça duas perguntas seguidas
-   - Nunca continue falando após fazer uma pergunta
+1. PRIMEIRA FALA (ABERTURA):
+   - Diga APENAS uma saudação curta com seu nome
+   - Exemplo: "Oi, aqui é a [nome]!"
+   - NÃO faça perguntas na abertura
+   - NÃO continue falando após a saudação
+   - PARE e ESPERE a pessoa responder "oi", "alô", etc.
 
-2. ESTRUTURA DE CADA TURNO:
-   - Máximo 1-2 frases curtas
-   - Se fizer uma pergunta, PARE e ESPERE
-   - Só fale novamente após ouvir a resposta
+2. APÓS A PESSOA RESPONDER:
+   - Aí sim, faça UMA pergunta
+   - Exemplo: "Tudo bem? Você tem um minutinho?"
+   - PARE e ESPERE a resposta
 
-3. O QUE NUNCA FAZER:
-   - Nunca fale mais de 2 frases seguidas
-   - Nunca faça múltiplas perguntas sem esperar resposta
-   - Nunca ignore o que a pessoa disse
+3. REGRA DE OURO:
+   - NUNCA fale mais de UMA frase por vez
+   - SEMPRE espere a pessoa responder
+   - Se fizer pergunta, PARE IMEDIATAMENTE
 
-4. COMPORTAMENTO NATURAL:
-   - Seja breve e direto
-   - Responda ao que a pessoa disse
-   - Faça uma pergunta de cada vez
-   - Aguarde pacientemente a resposta
+4. PROIBIDO:
+   - Fazer saudação + pergunta juntos
+   - Fazer duas perguntas seguidas
+   - Continuar falando sem resposta
+   - Responder suas próprias perguntas
 
 === FIM DAS REGRAS ===
 
@@ -222,17 +220,18 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
             type: 'server_vad',
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 1000,
+            silence_duration_ms: 1200,
           },
-          temperature: 0.7,
-          max_response_output_tokens: 80,
+          temperature: 0.6,
+          max_response_output_tokens: 50,
         },
       };
 
       openaiWs.send(JSON.stringify(sessionConfig));
-      console.log(`[OpenAI] Session configured`);
+      console.log(`[OpenAI] Session configured with strict rules`);
       
       setTimeout(() => {
+        console.log(`[OpenAI] Requesting initial greeting...`);
         const responseCreate = {
           type: 'response.create',
           response: {
@@ -240,12 +239,7 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
           },
         };
         openaiWs.send(JSON.stringify(responseCreate));
-        console.log(`[OpenAI] Initial greeting requested`);
-        
-        greetingTimeout = setTimeout(() => {
-          isInitialGreeting = false;
-        }, 8000);
-      }, 500);
+      }, 1000);
       
       resolve({ openaiWs, useElevenLabs });
     });
@@ -269,30 +263,19 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
           sentenceBuffer += response.delta;
           pendingTextResponse += response.delta;
           
-          if (sentenceBuffer.includes('?')) {
-            const questionIndex = sentenceBuffer.indexOf('?');
-            const upToQuestion = sentenceBuffer.substring(0, questionIndex + 1).trim();
+          const sentenceMatch = sentenceBuffer.match(/^([^.!?]+[.!?])/);
+          if (sentenceMatch) {
+            const completeSentence = sentenceMatch[1].trim();
+            sentenceBuffer = sentenceBuffer.slice(sentenceMatch[0].length).trim();
             
-            if (upToQuestion) {
-              console.log(`[OpenAI] ❓ Question detected, stopping generation`);
-              queueSentence(upToQuestion);
-              sentenceBuffer = '';
+            if (completeSentence.length > 0) {
+              console.log(`[OpenAI] Complete sentence: "${completeSentence}"`);
+              queueSentence(completeSentence);
               
-              openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-            }
-          } else {
-            const sentenceEnders = /[.!]/;
-            while (sentenceEnders.test(sentenceBuffer)) {
-              const match = sentenceBuffer.match(/^([^.!]+[.!]+)/);
-              if (match) {
-                const completeSentence = match[1].trim();
-                sentenceBuffer = sentenceBuffer.slice(match[0].length).trim();
-                
-                if (completeSentence.length > 0) {
-                  queueSentence(completeSentence);
-                }
-              } else {
-                break;
+              if (completeSentence.includes('?')) {
+                console.log(`[OpenAI] ❓ Question detected - canceling further generation`);
+                openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
+                sentenceBuffer = '';
               }
             }
           }
@@ -310,18 +293,19 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
               text: pendingTextResponse,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[AI] ${pendingTextResponse}`);
+            console.log(`[AI Said] ${pendingTextResponse}`);
           }
           
           pendingTextResponse = '';
         }
         
         if (response.type === 'input_audio_buffer.speech_started') {
-          console.log(`[OpenAI] 🎤 User speaking`);
-          questionAsked = false;
+          console.log(`[OpenAI] 🎤 User started speaking`);
+          userHasSpoken = true;
+          waitingForUserResponse = false;
           
-          if (!isInitialGreeting && isAISpeaking) {
-            console.log(`[OpenAI] Interrupting AI`);
+          if (isAISpeaking) {
+            console.log(`[OpenAI] Interrupting AI speech`);
             openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
             
             pendingTextResponse = '';
@@ -344,16 +328,19 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
         
         if (response.type === 'response.audio.done' && !useElevenLabs) {
           isAISpeaking = false;
+          waitingForUserResponse = true;
         }
         
         if (response.type === 'response.done') {
-          isInitialGreeting = false;
           isAISpeaking = false;
-          if (greetingTimeout) {
-            clearTimeout(greetingTimeout);
-            greetingTimeout = null;
+          console.log(`[OpenAI] Response generation done`);
+        }
+        
+        if (response.type === 'response.created') {
+          if (waitingForUserResponse && !userHasSpoken) {
+            console.log(`[OpenAI] ⛔ Blocking auto-response - waiting for user to speak first`);
+            openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
           }
-          console.log(`[OpenAI] Response done - waiting for user`);
         }
         
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
@@ -364,7 +351,10 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
               text: userText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[User] ${userText}`);
+            console.log(`[User Said] ${userText}`);
+            
+            userHasSpoken = true;
+            waitingForUserResponse = false;
           }
         }
         
@@ -376,7 +366,7 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
               text: aiText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[AI] ${aiText}`);
+            console.log(`[AI Said] ${aiText}`);
           }
         }
         
@@ -395,8 +385,6 @@ IMPORTANTE: Esta é uma ligação telefônica real. Siga estas regras rigorosame
 
     openaiWs.on('close', async () => {
       console.log(`[OpenAI] Connection closed`);
-      
-      if (greetingTimeout) clearTimeout(greetingTimeout);
       
       if (sessionData.transcription.length > 0 && callSid) {
         const transcriptionText = sessionData.transcription
@@ -499,9 +487,9 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '9.0.0',
+      version: '10.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
-      features: ['question-pause', 'generic-rules', 'short-responses'],
+      features: ['strict-turn-taking', 'response-blocking', 'question-cancel'],
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -509,7 +497,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v9\n');
+  res.end('Realtime WebSocket Server v10\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -526,9 +514,9 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server v9 running on port ${PORT}`);
+  console.log(`✅ Server v10 running on port ${PORT}`);
   console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
-  console.log(`📋 Features: Question pause, Generic rules`);
+  console.log(`📋 Features: Strict turn-taking, Response blocking`);
   console.log('========================================');
 });
 
