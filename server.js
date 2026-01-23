@@ -16,10 +16,10 @@ if (!OPENAI_API_KEY ) {
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v7 starting...');
+console.log('🚀 Realtime WebSocket Server v8 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
-console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs (optimized streaming)' : 'OpenAI');
+console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
 if (USE_ELEVENLABS) {
   console.log('🎙️ ElevenLabs Voice ID:', ELEVENLABS_VOICE_ID);
 }
@@ -55,7 +55,6 @@ async function saveTranscription(callSid, scriptId, transcription) {
   }
 }
 
-// ElevenLabs Text-to-Speech with streaming - OPTIMIZED for low latency
 async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
   try {
     const startTime = Date.now();
@@ -130,13 +129,14 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       script = await fetchScript(scriptId);
       if (script) {
         console.log(`[OpenAI] Script loaded: ${script.name}`);
+        console.log(`[OpenAI] System prompt preview: ${script.systemPrompt?.substring(0, 100)}...`);
       } else {
         console.warn(`[OpenAI] Script ${scriptId} not found, using defaults`);
       }
     }
     
     const useElevenLabs = USE_ELEVENLABS && (script?.useElevenLabs !== false);
-    console.log(`[Voice] Using ${useElevenLabs ? 'ElevenLabs (optimized)' : 'OpenAI'} for TTS`);
+    console.log(`[Voice] Using ${useElevenLabs ? 'ElevenLabs' : 'OpenAI'} for TTS`);
     
     const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
       headers: {
@@ -151,11 +151,13 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let sentenceBuffer = '';
     let isProcessingSentence = false;
     let sentenceQueue = [];
+    let isAISpeaking = false;
 
     async function processSentenceQueue() {
       if (isProcessingSentence || sentenceQueue.length === 0) return;
       
       isProcessingSentence = true;
+      isAISpeaking = true;
       const sentence = sentenceQueue.shift();
       
       if (sentence && sentence.trim()) {
@@ -166,6 +168,8 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       
       if (sentenceQueue.length > 0) {
         processSentenceQueue();
+      } else {
+        isAISpeaking = false;
       }
     }
 
@@ -179,21 +183,54 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected for stream ${streamSid}`);
       
-      const systemInstructions = script?.systemPrompt || 
-        'Você é um assistente prestativo que fala português brasileiro de forma natural e amigável.';
+      const conversationRules = `
+
+=== REGRAS CRÍTICAS DE CONVERSAÇÃO ===
+
+1. ESTRUTURA DE DIÁLOGO:
+   - Você está em uma LIGAÇÃO TELEFÔNICA real
+   - Fale UMA frase ou pergunta por vez
+   - SEMPRE espere a pessoa responder antes de continuar
+   - NUNCA faça monólogos longos
+   - Máximo 2 frases por turno
+
+2. FLUXO OBRIGATÓRIO:
+   - Apresente-se brevemente (1 frase)
+   - Faça UMA pergunta
+   - PARE e ESPERE a resposta
+   - Só continue após ouvir a resposta
+
+3. COMPORTAMENTO:
+   - Se a pessoa não responder em 3 segundos, pergunte "Está me ouvindo?"
+   - Se a pessoa disser "alô" ou "oi", responda e continue
+   - Se a pessoa fizer uma pergunta, responda primeiro
+   - Seja natural, como uma conversa real
+
+4. PROIBIÇÕES:
+   - NÃO fale mais de 2 frases seguidas
+   - NÃO faça várias perguntas de uma vez
+   - NÃO ignore o que a pessoa disse
+   - NÃO repita a apresentação
+
+5. EXEMPLO DE FLUXO CORRETO:
+   AI: "Olá, aqui é a Bruna da Solare. Com quem eu falo?"
+   [ESPERA RESPOSTA]
+   Pessoa: "É o João"
+   AI: "Oi João! Vi que você se interessou em energia solar, certo?"
+   [ESPERA RESPOSTA]
+
+=== FIM DAS REGRAS ===
+
+`;
+      
+      const userPrompt = script?.systemPrompt || 
+        'Você é um assistente prestativo que fala português brasileiro.';
       
       const voiceInstructions = script?.voiceInstructions || '';
       
-      const conversationRules = `
-
-REGRAS DE CONVERSAÇÃO:
-1. Fale de forma natural e fluida
-2. Use frases curtas e diretas para respostas mais rápidas
-3. Quando fizer uma pergunta, espere a resposta
-4. Seja objetivo mas cordial
-5. NÃO repita a saudação inicial`;
+      const fullInstructions = `${userPrompt}${voiceInstructions ? `\n\nInstruções de voz: ${voiceInstructions}` : ''}${conversationRules}`;
       
-      const fullInstructions = `${systemInstructions}${voiceInstructions ? `\n\nInstruções de voz: ${voiceInstructions}` : ''}${conversationRules}`;
+      console.log(`[OpenAI] Full instructions length: ${fullInstructions.length} chars`);
       
       const sessionConfig = {
         type: 'session.update',
@@ -210,15 +247,15 @@ REGRAS DE CONVERSAÇÃO:
             type: 'server_vad',
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 700,
+            silence_duration_ms: 800,
           },
           temperature: 0.7,
-          max_response_output_tokens: 300,
+          max_response_output_tokens: 150,
         },
       };
 
       openaiWs.send(JSON.stringify(sessionConfig));
-      console.log(`[OpenAI] Session configured (ElevenLabs: ${useElevenLabs})`);
+      console.log(`[OpenAI] Session configured with conversation rules`);
       
       setTimeout(() => {
         const responseCreate = {
@@ -232,8 +269,8 @@ REGRAS DE CONVERSAÇÃO:
         
         greetingTimeout = setTimeout(() => {
           isInitialGreeting = false;
-          console.log(`[OpenAI] Initial greeting phase ended, barge-in enabled`);
-        }, 5000);
+          console.log(`[OpenAI] Initial greeting phase ended`);
+        }, 8000);
       }, 500);
       
       resolve({ openaiWs, useElevenLabs });
@@ -244,6 +281,7 @@ REGRAS DE CONVERSAÇÃO:
         const response = JSON.parse(data.toString());
         
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
+          isAISpeaking = true;
           const twilioMessage = {
             event: 'media',
             streamSid: streamSid,
@@ -267,7 +305,7 @@ REGRAS DE CONVERSAÇÃO:
               sentenceBuffer = sentenceBuffer.slice(match[0].length).trim();
               
               if (completeSentence.length > 0) {
-                console.log(`[Streaming] Queueing sentence: "${completeSentence}"`);
+                console.log(`[Streaming] Queueing: "${completeSentence}"`);
                 queueSentence(completeSentence);
               }
             } else {
@@ -289,21 +327,23 @@ REGRAS DE CONVERSAÇÃO:
               text: pendingTextResponse,
               timestamp: new Date().toISOString(),
             });
+            console.log(`[AI Response] ${pendingTextResponse}`);
           }
           
           pendingTextResponse = '';
         }
         
         if (response.type === 'input_audio_buffer.speech_started') {
-          if (isInitialGreeting) {
-            console.log(`[OpenAI] 🎤 User speaking during greeting - ignoring`);
-          } else {
-            console.log(`[OpenAI] 🎤 User started speaking - interrupting AI`);
+          console.log(`[OpenAI] 🎤 User started speaking`);
+          
+          if (!isInitialGreeting && isAISpeaking) {
+            console.log(`[OpenAI] Interrupting AI speech`);
             openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
             
             pendingTextResponse = '';
             sentenceBuffer = '';
             sentenceQueue = [];
+            isAISpeaking = false;
             
             if (twilioWs.readyState === WebSocket.OPEN) {
               twilioWs.send(JSON.stringify({
@@ -314,13 +354,23 @@ REGRAS DE CONVERSAÇÃO:
           }
         }
         
+        if (response.type === 'input_audio_buffer.speech_stopped') {
+          console.log(`[OpenAI] 🎤 User stopped speaking`);
+        }
+        
+        if (response.type === 'response.audio.done' && !useElevenLabs) {
+          isAISpeaking = false;
+          console.log(`[OpenAI] Audio response completed`);
+        }
+        
         if (response.type === 'response.done') {
           isInitialGreeting = false;
+          isAISpeaking = false;
           if (greetingTimeout) {
             clearTimeout(greetingTimeout);
             greetingTimeout = null;
           }
-          console.log(`[OpenAI] Response completed, barge-in enabled`);
+          console.log(`[OpenAI] Response completed - waiting for user`);
         }
         
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
@@ -331,7 +381,7 @@ REGRAS DE CONVERSAÇÃO:
               text: userText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[Transcription] User: ${userText}`);
+            console.log(`[User] ${userText}`);
           }
         }
         
@@ -343,7 +393,7 @@ REGRAS DE CONVERSAÇÃO:
               text: aiText,
               timestamp: new Date().toISOString(),
             });
-            console.log(`[Transcription] AI: ${aiText}`);
+            console.log(`[AI] ${aiText}`);
           }
         }
         
@@ -403,7 +453,7 @@ function handleTwilioConnection(ws, req) {
 
       switch (data.event) {
         case 'connected':
-          console.log('[Twilio] 📞 Connected event received');
+          console.log('[Twilio] 📞 Connected');
           break;
 
         case 'start':
@@ -411,10 +461,7 @@ function handleTwilioConnection(ws, req) {
           const actualCallSid = data.start.callSid;
           const actualScriptId = data.start.customParameters?.scriptId || scriptId;
           
-          console.log(`[Twilio] 🚀 Stream started`);
-          console.log(`[Twilio] Stream SID: ${streamSid}`);
-          console.log(`[Twilio] Call SID: ${actualCallSid}`);
-          console.log(`[Twilio] Script ID: ${actualScriptId || 'none'}`);
+          console.log(`[Twilio] 🚀 Stream started - SID: ${streamSid}`);
           
           try {
             const result = await connectToOpenAI(ws, streamSid, actualCallSid, actualScriptId, sessionData);
@@ -437,11 +484,9 @@ function handleTwilioConnection(ws, req) {
 
         case 'media':
           if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-            const audioPayload = data.media.payload;
-            
             openaiWs.send(JSON.stringify({
               type: 'input_audio_buffer.append',
-              audio: audioPayload,
+              audio: data.media.payload,
             }));
           }
           break;
@@ -453,7 +498,7 @@ function handleTwilioConnection(ws, req) {
           break;
       }
     } catch (error) {
-      console.error('[Twilio] Error handling message:', error.message);
+      console.error('[Twilio] Error:', error.message);
     }
   });
 
@@ -473,8 +518,9 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '7.0.0',
-      voiceProvider: USE_ELEVENLABS ? 'ElevenLabs (optimized streaming)' : 'OpenAI',
+      version: '8.0.0',
+      voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
+      features: ['sentence-streaming', 'conversation-rules', 'barge-in'],
       activeSessions: activeSessions.size,
       uptime: process.uptime(),
     }));
@@ -482,7 +528,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v7 (ElevenLabs Optimized Streaming)\n');
+  res.end('Realtime WebSocket Server v8 (Conversation Rules)\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -500,17 +546,13 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs (optimized)' : 'OpenAI'}`);
-  console.log(`🌐 WebSocket endpoint: ws://localhost:${PORT}/media-stream`);
-  console.log(`💚 Health check: http://localhost:${PORT}/health` );
+  console.log(`✅ Server v8 running on port ${PORT}`);
+  console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
+  console.log(`📋 Features: Conversation rules, Sentence streaming`);
   console.log('========================================');
 });
 
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, closing server...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 });
