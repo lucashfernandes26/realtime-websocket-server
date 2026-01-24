@@ -9,14 +9,14 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
-if (!OPENAI_API_KEY ) {
+if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is required');
   process.exit(1);
 }
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v12 starting...');
+console.log('🚀 Realtime WebSocket Server v13 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -42,25 +42,23 @@ async function fetchWithRetry(url, options = {}, maxRetries = 3) {
 
 async function fetchScript(scriptId) {
   try {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/scripts/${scriptId}`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const response = await fetchWithRetry(`<LaTex>${API_BASE_URL}/api/scripts/$</LaTex>{scriptId}`);
+    if (!response.ok) throw new Error(`HTTP <LaTex>${response.status}`);
     return await response.json();
   } catch (error) {
-    console.error(`[Script] Failed to fetch script ${scriptId}:`, error.message);
+    console.error(`[Script] Failed to fetch script $</LaTex>{scriptId}:`, error.message);
     return null;
   }
 }
 
 async function saveTranscription(callSid, scriptId, transcription) {
   try {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/twilio/save-transcription`, {
+    const response = await fetchWithRetry(`<LaTex>${API_BASE_URL}/api/twilio/save-transcription`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ callSid, scriptId, transcription }),
     });
-    if (response.ok) {
-      console.log(`[Transcription] ✅ Saved for call ${callSid}`);
-    }
+    if (response.ok) console.log(`[Transcription] ✅ Saved for call $</LaTex>{callSid}`);
   } catch (error) {
     console.error(`[Transcription] Error:`, error.message);
   }
@@ -69,12 +67,11 @@ async function saveTranscription(callSid, scriptId, transcription) {
 async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
   try {
     if (abortSignal?.aborted) return false;
-    
     const startTime = Date.now();
-    console.log(`[ElevenLabs] Converting: "${text.substring(0, 50)}..."`);
+    console.log(`[ElevenLabs] Converting: "<LaTex>${text.substring(0, 50)}..."`);
     
     const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000&optimize_streaming_latency=4`,
+      `https://api.elevenlabs.io/v1/text-to-speech/$</LaTex>{ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000&optimize_streaming_latency=4`,
       {
         method: 'POST',
         headers: {
@@ -85,13 +82,8 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
         body: JSON.stringify({
           text: text,
           model_id: 'eleven_turbo_v2_5',
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.8,
-            style: 0.0,
-            use_speaker_boost: true,
-          },
-        } ),
+          voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true },
+        }),
         signal: abortSignal,
       }
     );
@@ -105,33 +97,19 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
     let bytesSent = 0;
     
     while (true) {
-      if (abortSignal?.aborted) {
-        reader.cancel();
-        return false;
-      }
-      
+      if (abortSignal?.aborted) { reader.cancel(); return false; }
       const { done, value } = await reader.read();
       if (done) break;
-      
       const base64Audio = Buffer.from(value).toString('base64');
       bytesSent += value.length;
-      
       if (twilioWs.readyState === WebSocket.OPEN) {
-        twilioWs.send(JSON.stringify({
-          event: 'media',
-          streamSid: streamSid,
-          media: { payload: base64Audio },
-        }));
+        twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: base64Audio } }));
       }
     }
-    
     console.log(`[ElevenLabs] ✅ Done in ${Date.now() - startTime}ms (${bytesSent} bytes)`);
     return true;
   } catch (error) {
-    if (error.name === 'AbortError') {
-      console.log(`[ElevenLabs] Aborted`);
-      return false;
-    }
+    if (error.name === 'AbortError') { console.log(`[ElevenLabs] Aborted`); return false; }
     console.error(`[ElevenLabs] Error:`, error.message);
     return false;
   }
@@ -144,21 +122,18 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let script = null;
     if (scriptId) {
       script = await fetchScript(scriptId);
-      if (script) {
-        console.log(`[OpenAI] ✅ Script loaded: ${script.name}`);
-      }
+      if (script) console.log(`[OpenAI] ✅ Script loaded: <LaTex>${script.name}`);
     }
     
     const useElevenLabs = USE_ELEVENLABS && (script?.useElevenLabs !== false);
     
     const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1',
-      },
+      headers: { 'Authorization': `Bearer $</LaTex>{OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' },
     });
 
     let state = {
+      greetingSent: false,
+      greetingComplete: false,
       waitingForUser: false,
       userHasSpoken: false,
       isAISpeaking: false,
@@ -172,21 +147,18 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let sentenceBuffer = '';
     let sentenceQueue = [];
     let isProcessingSentence = false;
-    
     const pingInterval = setInterval(() => {}, 30000);
 
     async function processSentenceQueue() {
       if (isProcessingSentence || sentenceQueue.length === 0 || !state.conversationActive) return;
-      
       isProcessingSentence = true;
       state.isAISpeaking = true;
       state.abortController = new AbortController();
       
       while (sentenceQueue.length > 0 && state.conversationActive) {
         if (state.abortController.signal.aborted) break;
-        
         const sentence = sentenceQueue.shift();
-        if (sentence && sentence.trim()) {
+        if (sentence?.trim()) {
           const success = await textToSpeechElevenLabs(sentence, twilioWs, streamSid, state.abortController.signal);
           if (!success) break;
         }
@@ -199,11 +171,12 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       if (state.conversationActive && sentenceQueue.length === 0) {
         console.log(`[State] AI finished - waiting for user (turn ${state.turnCount})`);
         state.waitingForUser = true;
+        if (state.turnCount === 0) state.greetingComplete = true;
       }
     }
 
     function queueSentence(sentence) {
-      if (sentence && sentence.trim() && state.conversationActive) {
+      if (sentence?.trim() && state.conversationActive) {
         sentenceQueue.push(sentence);
         processSentenceQueue();
       }
@@ -212,17 +185,13 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     function interruptAI() {
       console.log(`[State] Interrupting AI`);
       if (state.abortController) state.abortController.abort();
-      if (openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-      }
+      if (openaiWs.readyState === WebSocket.OPEN) openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
       pendingTextResponse = '';
       sentenceBuffer = '';
       sentenceQueue = [];
       state.isAISpeaking = false;
       isProcessingSentence = false;
-      if (twilioWs.readyState === WebSocket.OPEN) {
-        twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
-      }
+      if (twilioWs.readyState === WebSocket.OPEN) twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
     }
 
     openaiWs.on('open', () => {
@@ -249,6 +218,7 @@ REGRAS CRÍTICAS:
 - NUNCA faça duas perguntas seguidas
 - NUNCA ignore o que a pessoa disse
 - NUNCA faça monólogos longos
+- NUNCA repita a abertura ou saudação
 - Se a pessoa disser só "oi" ou "alô", continue naturalmente
 - Se a pessoa parecer confusa, explique novamente de forma simples
 
@@ -261,9 +231,9 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
       
       const userPrompt = script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro de forma natural e amigável.';
       const voiceInstructions = script?.voiceInstructions || '';
-      const fullInstructions = `${userPrompt}${voiceInstructions ? `\n\nInstruções de voz: ${voiceInstructions}` : ''}${conversationRules}`;
+      const fullInstructions = `${userPrompt}<LaTex>${voiceInstructions ? `\n\nInstruções de voz: $</LaTex>{voiceInstructions}` : ''}${conversationRules}`;
       
-      const sessionConfig = {
+      openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
           modalities: useElevenLabs ? ['text'] : ['text', 'audio'],
@@ -272,26 +242,17 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 800,
-          },
+          turn_detection: { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 800 },
           temperature: 0.7,
           max_response_output_tokens: 150,
         },
-      };
-
-      openaiWs.send(JSON.stringify(sessionConfig));
+      }));
       
       setTimeout(() => {
-        if (openaiWs.readyState === WebSocket.OPEN && state.conversationActive) {
-          console.log(`[OpenAI] Starting conversation...`);
-          openaiWs.send(JSON.stringify({
-            type: 'response.create',
-            response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] },
-          }));
+        if (openaiWs.readyState === WebSocket.OPEN && state.conversationActive && !state.greetingSent) {
+          state.greetingSent = true;
+          console.log(`[OpenAI] Starting greeting (once)...`);
+          openaiWs.send(JSON.stringify({ type: 'response.create', response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } }));
         }
       }, 500);
       
@@ -305,11 +266,7 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
           state.isAISpeaking = true;
           if (twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'media',
-              streamSid: streamSid,
-              media: { payload: response.delta },
-            }));
+            twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: response.delta } }));
           }
         }
         
@@ -321,11 +278,9 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
           while ((match = sentenceBuffer.match(/^([^.!?]*[.!?])\s*/))) {
             const completeSentence = match[1].trim();
             sentenceBuffer = sentenceBuffer.slice(match[0].length);
-            
             if (completeSentence.length > 0) {
               console.log(`[OpenAI] 📝 "${completeSentence}"`);
               queueSentence(completeSentence);
-              
               if (completeSentence.includes('?')) {
                 console.log(`[OpenAI] ❓ Question - stopping generation`);
                 openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
@@ -339,13 +294,8 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
         if (response.type === 'response.text.done' && useElevenLabs) {
           if (sentenceBuffer.trim()) queueSentence(sentenceBuffer.trim());
           sentenceBuffer = '';
-          
           if (pendingTextResponse.trim()) {
-            sessionData.transcription.push({
-              role: 'assistant',
-              text: pendingTextResponse,
-              timestamp: new Date().toISOString(),
-            });
+            sessionData.transcription.push({ role: 'assistant', text: pendingTextResponse, timestamp: new Date().toISOString() });
             console.log(`[AI] ${pendingTextResponse}`);
           }
           pendingTextResponse = '';
@@ -359,23 +309,25 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
           if (state.isAISpeaking) interruptAI();
         }
         
-        if (response.type === 'input_audio_buffer.speech_stopped') {
-          console.log(`[User] 🎤 Stopped`);
-        }
+        if (response.type === 'input_audio_buffer.speech_stopped') console.log(`[User] 🎤 Stopped`);
         
         if (response.type === 'response.audio.done' && !useElevenLabs) {
           state.isAISpeaking = false;
           state.waitingForUser = true;
           state.turnCount++;
+          if (state.turnCount === 1) state.greetingComplete = true;
         }
         
         if (response.type === 'response.done') {
           state.isAISpeaking = false;
+          console.log(`[OpenAI] Response done (turn ${state.turnCount})`);
         }
         
         if (response.type === 'response.created') {
-          if (state.waitingForUser && !state.userHasSpoken && state.turnCount > 0) {
-            console.log(`[OpenAI] ⛔ Blocking auto-response`);
+          const shouldBlock = (state.greetingSent && !state.greetingComplete && state.turnCount === 0) ||
+                              (state.waitingForUser && !state.userHasSpoken && state.turnCount > 0);
+          if (shouldBlock) {
+            console.log(`[OpenAI] ⛔ Blocking duplicate/auto response`);
             openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
           } else {
             state.userHasSpoken = false;
@@ -387,11 +339,7 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
           const userText = response.transcript || '';
           if (userText.trim()) {
             state.lastUserInput = userText;
-            sessionData.transcription.push({
-              role: 'user',
-              text: userText,
-              timestamp: new Date().toISOString(),
-            });
+            sessionData.transcription.push({ role: 'user', text: userText, timestamp: new Date().toISOString() });
             console.log(`[User] ${userText}`);
             state.userHasSpoken = true;
             state.waitingForUser = false;
@@ -400,41 +348,26 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
         
         if (response.type === 'response.audio_transcript.done' && !useElevenLabs) {
           const aiText = response.transcript || '';
-          if (aiText.trim()) {
-            sessionData.transcription.push({
-              role: 'assistant',
-              text: aiText,
-              timestamp: new Date().toISOString(),
-            });
-          }
+          if (aiText.trim()) sessionData.transcription.push({ role: 'assistant', text: aiText, timestamp: new Date().toISOString() });
         }
         
         if (response.type === 'error') {
           console.error(`[OpenAI] ❌ Error:`, response.error);
-          if (response.error?.code === 'session_expired') {
-            state.conversationActive = false;
-          }
+          if (response.error?.code === 'session_expired') state.conversationActive = false;
         }
       } catch (error) {
         console.error(`[OpenAI] Parse error:`, error.message);
       }
     });
 
-    openaiWs.on('error', (error) => {
-      console.error(`[OpenAI] ❌ WebSocket error:`, error.message);
-      clearInterval(pingInterval);
-      reject(error);
-    });
-
+    openaiWs.on('error', (error) => { console.error(`[OpenAI] ❌ Error:`, error.message); clearInterval(pingInterval); reject(error); });
+    
     openaiWs.on('close', async (code) => {
       console.log(`[OpenAI] Connection closed (code: ${code})`);
       clearInterval(pingInterval);
       state.conversationActive = false;
-      
       if (sessionData.transcription.length > 0 && callSid) {
-        const transcriptionText = sessionData.transcription
-          .map(t => `[${t.role.toUpperCase()}]: ${t.text}`)
-          .join('\n');
+        const transcriptionText = sessionData.transcription.map(t => `[<LaTex>${t.role.toUpperCase()}]: $</LaTex>{t.text}`).join('\n');
         await saveTranscription(callSid, scriptId, transcriptionText);
       }
     });
@@ -444,95 +377,68 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
 function handleTwilioConnection(ws, req) {
   const { query } = parse(req.url, true);
   const sessionData = { transcription: [], startTime: new Date() };
-  
   console.log('[Twilio] 🎤 New connection');
   
-  let streamSid = null;
-  let openaiWs = null;
-  let connectionActive = true;
+  let streamSid = null, openaiWs = null, connectionActive = true;
 
   ws.on('message', async (message) => {
     if (!connectionActive) return;
-    
     try {
       const data = JSON.parse(message.toString());
-
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
         const callSid = data.start.callSid;
         const scriptId = data.start.customParameters?.scriptId || query.scriptId;
-        
-        console.log(`[Twilio] 🚀 Stream: ${streamSid}, Script: ${scriptId}`);
-        
+        console.log(`[Twilio] 🚀 Stream: <LaTex>${streamSid}, Script: $</LaTex>{scriptId}`);
         const result = await connectToOpenAI(ws, streamSid, callSid, scriptId, sessionData);
         openaiWs = result.openaiWs;
-        
         activeSessions.set(streamSid, { twilioWs: ws, openaiWs, streamSid, callSid, scriptId, sessionData, startTime: new Date() });
       }
-      
       if (data.event === 'media' && openaiWs?.readyState === WebSocket.OPEN) {
         openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: data.media.payload }));
       }
-      
       if (data.event === 'stop') {
         connectionActive = false;
         if (openaiWs) openaiWs.close();
         if (streamSid) activeSessions.delete(streamSid);
       }
-    } catch (error) {
-      console.error('[Twilio] Error:', error.message);
-    }
+    } catch (error) { console.error('[Twilio] Error:', error.message); }
   });
 
-  ws.on('close', () => {
-    connectionActive = false;
-    if (openaiWs) openaiWs.close();
-    if (streamSid) activeSessions.delete(streamSid);
-  });
+  ws.on('close', () => { connectionActive = false; if (openaiWs) openaiWs.close(); if (streamSid) activeSessions.delete(streamSid); });
 }
 
 const server = createServer((req, res) => {
   if (req.url === '/health') {
-    const sessions = Array.from(activeSessions.values()).map(s => ({
-      streamSid: s.streamSid,
-      duration: Math.round((Date.now() - s.startTime) / 1000),
-    }));
-    
+    const sessions = Array.from(activeSessions.values()).map(s => ({ streamSid: s.streamSid, duration: Math.round((Date.now() - s.startTime) / 1000) }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '12.0.0',
+      version: '13.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
-      features: ['improved-stability', 'abort-controller', 'retry-logic', 'better-turn-tracking'],
+      features: ['no-double-greeting', 'improved-blocking', 'stable-turns'],
       activeSessions: activeSessions.size,
-      sessions: sessions,
+      sessions,
       uptime: Math.round(process.uptime()),
     }));
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v12\n');
+  res.end('Realtime WebSocket Server v13\n');
 });
 
 const wss = new WebSocketServer({ server });
-
 wss.on('connection', (ws, req) => {
   const { pathname } = parse(req.url);
   if (pathname === '/media-stream') handleTwilioConnection(ws, req);
   else ws.close();
 });
 
-server.listen(PORT, () => {
-  console.log(`✅ Server v12 running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`✅ Server v13 running on port ${PORT}`));
 
 process.on('SIGTERM', () => {
-  for (const [, session] of activeSessions) {
-    if (session.openaiWs) session.openaiWs.close();
-    if (session.twilioWs) session.twilioWs.close();
-  }
+  for (const [, session] of activeSessions) { if (session.openaiWs) session.openaiWs.close(); if (session.twilioWs) session.twilioWs.close(); }
   server.close(() => process.exit(0));
 });
-
 process.on('uncaughtException', (error) => console.error('Uncaught exception:', error));
 process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
