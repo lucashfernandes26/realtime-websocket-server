@@ -9,69 +9,39 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
-if (!OPENAI_API_KEY) {
+if (!OPENAI_API_KEY ) {
   console.error('❌ OPENAI_API_KEY is required');
   process.exit(1);
 }
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v13 starting...');
+console.log('🚀 Realtime WebSocket Server v14 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
+console.log('🎙️ Voice ID:', ELEVENLABS_VOICE_ID || 'N/A');
 
 const activeSessions = new Map();
 
-async function fetchWithRetry(url, options = {}, maxRetries = 3) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const response = await fetch(url, options);
-      if (response.ok) return response;
-      if (response.status >= 500) {
-        await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
-        continue;
-      }
-      return response;
-    } catch (error) {
-      if (i === maxRetries - 1) throw error;
-      await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
-    }
-  }
-}
-
 async function fetchScript(scriptId) {
   try {
-    const response = await fetchWithRetry(`<LaTex>${API_BASE_URL}/api/scripts/$</LaTex>{scriptId}`);
-    if (!response.ok) throw new Error(`HTTP <LaTex>${response.status}`);
+    const response = await fetch(`${API_BASE_URL}/api/scripts/${scriptId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
   } catch (error) {
-    console.error(`[Script] Failed to fetch script $</LaTex>{scriptId}:`, error.message);
+    console.error(`[Script] Failed to fetch script ${scriptId}:`, error.message);
     return null;
   }
 }
 
-async function saveTranscription(callSid, scriptId, transcription) {
+async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
   try {
-    const response = await fetchWithRetry(`<LaTex>${API_BASE_URL}/api/twilio/save-transcription`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callSid, scriptId, transcription }),
-    });
-    if (response.ok) console.log(`[Transcription] ✅ Saved for call $</LaTex>{callSid}`);
-  } catch (error) {
-    console.error(`[Transcription] Error:`, error.message);
-  }
-}
-
-async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
-  try {
-    if (abortSignal?.aborted) return false;
     const startTime = Date.now();
-    console.log(`[ElevenLabs] Converting: "<LaTex>${text.substring(0, 50)}..."`);
+    console.log(`[ElevenLabs] 🎤 Converting: "${text.substring(0, 60)}..."`);
     
     const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/$</LaTex>{ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000&optimize_streaming_latency=4`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000&optimize_streaming_latency=4`,
       {
         method: 'POST',
         headers: {
@@ -83,13 +53,13 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
           text: text,
           model_id: 'eleven_turbo_v2_5',
           voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true },
-        }),
-        signal: abortSignal,
+        } ),
       }
     );
 
     if (!response.ok) {
-      console.error(`[ElevenLabs] Error: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`[ElevenLabs] ❌ Error ${response.status}: ${errorText}`);
       return false;
     }
 
@@ -97,7 +67,6 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
     let bytesSent = 0;
     
     while (true) {
-      if (abortSignal?.aborted) { reader.cancel(); return false; }
       const { done, value } = await reader.read();
       if (done) break;
       const base64Audio = Buffer.from(value).toString('base64');
@@ -106,11 +75,11 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid, abortSignal) {
         twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: base64Audio } }));
       }
     }
-    console.log(`[ElevenLabs] ✅ Done in ${Date.now() - startTime}ms (${bytesSent} bytes)`);
+    
+    console.log(`[ElevenLabs] ✅ Sent ${bytesSent} bytes in ${Date.now() - startTime}ms`);
     return true;
   } catch (error) {
-    if (error.name === 'AbortError') { console.log(`[ElevenLabs] Aborted`); return false; }
-    console.error(`[ElevenLabs] Error:`, error.message);
+    console.error(`[ElevenLabs] ❌ Error:`, error.message);
     return false;
   }
 }
@@ -122,77 +91,19 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let script = null;
     if (scriptId) {
       script = await fetchScript(scriptId);
-      if (script) console.log(`[OpenAI] ✅ Script loaded: <LaTex>${script.name}`);
+      if (script) console.log(`[OpenAI] ✅ Script loaded: ${script.name}`);
     }
     
-    const useElevenLabs = USE_ELEVENLABS && (script?.useElevenLabs !== false);
+    const useElevenLabs = USE_ELEVENLABS;
+    console.log(`[OpenAI] Using ElevenLabs: ${useElevenLabs}`);
     
     const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
-      headers: { 'Authorization': `Bearer $</LaTex>{OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' },
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' },
     });
 
-    let state = {
-      greetingSent: false,
-      greetingComplete: false,
-      waitingForUser: false,
-      userHasSpoken: false,
-      isAISpeaking: false,
-      turnCount: 0,
-      lastUserInput: '',
-      conversationActive: true,
-      abortController: null,
-    };
-    
-    let pendingTextResponse = '';
-    let sentenceBuffer = '';
-    let sentenceQueue = [];
-    let isProcessingSentence = false;
-    const pingInterval = setInterval(() => {}, 30000);
-
-    async function processSentenceQueue() {
-      if (isProcessingSentence || sentenceQueue.length === 0 || !state.conversationActive) return;
-      isProcessingSentence = true;
-      state.isAISpeaking = true;
-      state.abortController = new AbortController();
-      
-      while (sentenceQueue.length > 0 && state.conversationActive) {
-        if (state.abortController.signal.aborted) break;
-        const sentence = sentenceQueue.shift();
-        if (sentence?.trim()) {
-          const success = await textToSpeechElevenLabs(sentence, twilioWs, streamSid, state.abortController.signal);
-          if (!success) break;
-        }
-      }
-      
-      isProcessingSentence = false;
-      state.isAISpeaking = false;
-      state.abortController = null;
-      
-      if (state.conversationActive && sentenceQueue.length === 0) {
-        console.log(`[State] AI finished - waiting for user (turn ${state.turnCount})`);
-        state.waitingForUser = true;
-        if (state.turnCount === 0) state.greetingComplete = true;
-      }
-    }
-
-    function queueSentence(sentence) {
-      if (sentence?.trim() && state.conversationActive) {
-        sentenceQueue.push(sentence);
-        processSentenceQueue();
-      }
-    }
-    
-    function interruptAI() {
-      console.log(`[State] Interrupting AI`);
-      if (state.abortController) state.abortController.abort();
-      if (openaiWs.readyState === WebSocket.OPEN) openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-      pendingTextResponse = '';
-      sentenceBuffer = '';
-      sentenceQueue = [];
-      state.isAISpeaking = false;
-      isProcessingSentence = false;
-      if (twilioWs.readyState === WebSocket.OPEN) twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
-    }
+    let greetingSent = false;
+    let fullResponse = '';
+    let isProcessing = false;
 
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected`);
@@ -201,60 +112,45 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
 
 === REGRAS DE CONVERSAÇÃO TELEFÔNICA ===
 
-Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras RIGOROSAMENTE:
+Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
 
-ABERTURA:
-- Se apresente com nome, empresa e motivo da ligação
-- Termine com uma pergunta simples como "tudo bem?" ou "posso falar?"
-- Exemplo: "Oi! Aqui é a Bruna da Solare, tô ligando sobre energia solar. Tudo bem com você?"
-
-DURANTE A CONVERSA:
-- Fale no MÁXIMO 2 frases por vez
-- Após fazer uma pergunta, PARE e ESPERE a resposta
-- Responda ao que a pessoa disse ANTES de fazer nova pergunta
-- Seja natural, amigável e use linguagem informal
-
-REGRAS CRÍTICAS:
-- NUNCA faça duas perguntas seguidas
-- NUNCA ignore o que a pessoa disse
-- NUNCA faça monólogos longos
-- NUNCA repita a abertura ou saudação
-- Se a pessoa disser só "oi" ou "alô", continue naturalmente
-- Se a pessoa parecer confusa, explique novamente de forma simples
-
-OBJETIVO:
-Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualificar lead, etc.)
+1. Se apresente com nome, empresa e motivo da ligação
+2. Termine a abertura com uma pergunta simples
+3. Fale no MÁXIMO 2 frases por vez
+4. Após fazer uma pergunta, PARE e ESPERE a resposta
+5. NUNCA faça duas perguntas seguidas
+6. NUNCA repita a abertura
+7. Seja natural e amigável
 
 === FIM DAS REGRAS ===
 
 `;
       
-      const userPrompt = script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro de forma natural e amigável.';
-      const voiceInstructions = script?.voiceInstructions || '';
-      const fullInstructions = `${userPrompt}<LaTex>${voiceInstructions ? `\n\nInstruções de voz: $</LaTex>{voiceInstructions}` : ''}${conversationRules}`;
+      const userPrompt = script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro.';
+      const fullInstructions = `${userPrompt}${conversationRules}`;
       
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
           modalities: useElevenLabs ? ['text'] : ['text', 'audio'],
           instructions: fullInstructions,
-          voice: script?.voiceId || 'shimmer',
+          voice: 'shimmer',
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 800 },
+          turn_detection: { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 700 },
           temperature: 0.7,
           max_response_output_tokens: 150,
         },
       }));
       
       setTimeout(() => {
-        if (openaiWs.readyState === WebSocket.OPEN && state.conversationActive && !state.greetingSent) {
-          state.greetingSent = true;
-          console.log(`[OpenAI] Starting greeting (once)...`);
+        if (openaiWs.readyState === WebSocket.OPEN && !greetingSent) {
+          greetingSent = true;
+          console.log(`[OpenAI] 🎬 Starting greeting...`);
           openaiWs.send(JSON.stringify({ type: 'response.create', response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } }));
         }
-      }, 500);
+      }, 800);
       
       resolve({ openaiWs, useElevenLabs });
     });
@@ -264,113 +160,48 @@ Siga o script fornecido para alcançar o objetivo (ex: agendar visita, qualifica
         const response = JSON.parse(data.toString());
         
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
-          state.isAISpeaking = true;
           if (twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: response.delta } }));
           }
         }
         
         if (response.type === 'response.text.delta' && response.delta && useElevenLabs) {
-          sentenceBuffer += response.delta;
-          pendingTextResponse += response.delta;
-          
-          let match;
-          while ((match = sentenceBuffer.match(/^([^.!?]*[.!?])\s*/))) {
-            const completeSentence = match[1].trim();
-            sentenceBuffer = sentenceBuffer.slice(match[0].length);
-            if (completeSentence.length > 0) {
-              console.log(`[OpenAI] 📝 "${completeSentence}"`);
-              queueSentence(completeSentence);
-              if (completeSentence.includes('?')) {
-                console.log(`[OpenAI] ❓ Question - stopping generation`);
-                openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-                sentenceBuffer = '';
-                break;
-              }
-            }
-          }
+          fullResponse += response.delta;
         }
         
         if (response.type === 'response.text.done' && useElevenLabs) {
-          if (sentenceBuffer.trim()) queueSentence(sentenceBuffer.trim());
-          sentenceBuffer = '';
-          if (pendingTextResponse.trim()) {
-            sessionData.transcription.push({ role: 'assistant', text: pendingTextResponse, timestamp: new Date().toISOString() });
-            console.log(`[AI] ${pendingTextResponse}`);
+          const textToSpeak = fullResponse.trim();
+          fullResponse = '';
+          if (textToSpeak && !isProcessing) {
+            isProcessing = true;
+            console.log(`[OpenAI] 📝 Full response: "${textToSpeak}"`);
+            sessionData.transcription.push({ role: 'assistant', text: textToSpeak, timestamp: new Date().toISOString() });
+            await textToSpeechElevenLabs(textToSpeak, twilioWs, streamSid);
+            isProcessing = false;
           }
-          pendingTextResponse = '';
-          state.turnCount++;
         }
         
         if (response.type === 'input_audio_buffer.speech_started') {
           console.log(`[User] 🎤 Speaking...`);
-          state.userHasSpoken = true;
-          state.waitingForUser = false;
-          if (state.isAISpeaking) interruptAI();
-        }
-        
-        if (response.type === 'input_audio_buffer.speech_stopped') console.log(`[User] 🎤 Stopped`);
-        
-        if (response.type === 'response.audio.done' && !useElevenLabs) {
-          state.isAISpeaking = false;
-          state.waitingForUser = true;
-          state.turnCount++;
-          if (state.turnCount === 1) state.greetingComplete = true;
-        }
-        
-        if (response.type === 'response.done') {
-          state.isAISpeaking = false;
-          console.log(`[OpenAI] Response done (turn ${state.turnCount})`);
-        }
-        
-        if (response.type === 'response.created') {
-          const shouldBlock = (state.greetingSent && !state.greetingComplete && state.turnCount === 0) ||
-                              (state.waitingForUser && !state.userHasSpoken && state.turnCount > 0);
-          if (shouldBlock) {
-            console.log(`[OpenAI] ⛔ Blocking duplicate/auto response`);
-            openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
-          } else {
-            state.userHasSpoken = false;
-            state.waitingForUser = false;
-          }
+          if (twilioWs.readyState === WebSocket.OPEN) twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
         }
         
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
           const userText = response.transcript || '';
           if (userText.trim()) {
-            state.lastUserInput = userText;
+            console.log(`[User] 💬 "${userText}"`);
             sessionData.transcription.push({ role: 'user', text: userText, timestamp: new Date().toISOString() });
-            console.log(`[User] ${userText}`);
-            state.userHasSpoken = true;
-            state.waitingForUser = false;
           }
         }
         
-        if (response.type === 'response.audio_transcript.done' && !useElevenLabs) {
-          const aiText = response.transcript || '';
-          if (aiText.trim()) sessionData.transcription.push({ role: 'assistant', text: aiText, timestamp: new Date().toISOString() });
-        }
-        
-        if (response.type === 'error') {
-          console.error(`[OpenAI] ❌ Error:`, response.error);
-          if (response.error?.code === 'session_expired') state.conversationActive = false;
-        }
+        if (response.type === 'error') console.error(`[OpenAI] ❌ Error:`, response.error);
       } catch (error) {
         console.error(`[OpenAI] Parse error:`, error.message);
       }
     });
 
-    openaiWs.on('error', (error) => { console.error(`[OpenAI] ❌ Error:`, error.message); clearInterval(pingInterval); reject(error); });
-    
-    openaiWs.on('close', async (code) => {
-      console.log(`[OpenAI] Connection closed (code: ${code})`);
-      clearInterval(pingInterval);
-      state.conversationActive = false;
-      if (sessionData.transcription.length > 0 && callSid) {
-        const transcriptionText = sessionData.transcription.map(t => `[<LaTex>${t.role.toUpperCase()}]: $</LaTex>{t.text}`).join('\n');
-        await saveTranscription(callSid, scriptId, transcriptionText);
-      }
-    });
+    openaiWs.on('error', (error) => { console.error(`[OpenAI] ❌ Error:`, error.message); reject(error); });
+    openaiWs.on('close', (code) => console.log(`[OpenAI] Connection closed (code: ${code})`));
   });
 }
 
@@ -379,52 +210,49 @@ function handleTwilioConnection(ws, req) {
   const sessionData = { transcription: [], startTime: new Date() };
   console.log('[Twilio] 🎤 New connection');
   
-  let streamSid = null, openaiWs = null, connectionActive = true;
+  let streamSid = null, openaiWs = null;
 
   ws.on('message', async (message) => {
-    if (!connectionActive) return;
     try {
       const data = JSON.parse(message.toString());
       if (data.event === 'start') {
         streamSid = data.start.streamSid;
         const callSid = data.start.callSid;
         const scriptId = data.start.customParameters?.scriptId || query.scriptId;
-        console.log(`[Twilio] 🚀 Stream: <LaTex>${streamSid}, Script: $</LaTex>{scriptId}`);
+        console.log(`[Twilio] 🚀 Stream: ${streamSid}, Script: ${scriptId}`);
         const result = await connectToOpenAI(ws, streamSid, callSid, scriptId, sessionData);
         openaiWs = result.openaiWs;
-        activeSessions.set(streamSid, { twilioWs: ws, openaiWs, streamSid, callSid, scriptId, sessionData, startTime: new Date() });
+        activeSessions.set(streamSid, { twilioWs: ws, openaiWs, streamSid, startTime: new Date() });
       }
       if (data.event === 'media' && openaiWs?.readyState === WebSocket.OPEN) {
         openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: data.media.payload }));
       }
       if (data.event === 'stop') {
-        connectionActive = false;
+        console.log(`[Twilio] 🛑 Stream stopped`);
         if (openaiWs) openaiWs.close();
         if (streamSid) activeSessions.delete(streamSid);
       }
     } catch (error) { console.error('[Twilio] Error:', error.message); }
   });
 
-  ws.on('close', () => { connectionActive = false; if (openaiWs) openaiWs.close(); if (streamSid) activeSessions.delete(streamSid); });
+  ws.on('close', () => { console.log(`[Twilio] 👋 Disconnected`); if (openaiWs) openaiWs.close(); if (streamSid) activeSessions.delete(streamSid); });
 }
 
 const server = createServer((req, res) => {
   if (req.url === '/health') {
-    const sessions = Array.from(activeSessions.values()).map(s => ({ streamSid: s.streamSid, duration: Math.round((Date.now() - s.startTime) / 1000) }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '13.0.0',
+      version: '14.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
-      features: ['no-double-greeting', 'improved-blocking', 'stable-turns'],
+      voiceId: ELEVENLABS_VOICE_ID || 'N/A',
       activeSessions: activeSessions.size,
-      sessions,
       uptime: Math.round(process.uptime()),
     }));
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v13\n');
+  res.end('Realtime WebSocket Server v14\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -434,11 +262,14 @@ wss.on('connection', (ws, req) => {
   else ws.close();
 });
 
-server.listen(PORT, () => console.log(`✅ Server v13 running on port ${PORT}`));
-
-process.on('SIGTERM', () => {
-  for (const [, session] of activeSessions) { if (session.openaiWs) session.openaiWs.close(); if (session.twilioWs) session.twilioWs.close(); }
-  server.close(() => process.exit(0));
+server.listen(PORT, () => {
+  console.log('========================================');
+  console.log(`✅ Server v14 running on port ${PORT}`);
+  console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
+  console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
+  console.log('========================================');
 });
-process.on('uncaughtException', (error) => console.error('Uncaught exception:', error));
-process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
+
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('uncaughtException', (error) => console.error('Uncaught:', error));
+process.on('unhandledRejection', (reason) => console.error('Unhandled:', reason));
