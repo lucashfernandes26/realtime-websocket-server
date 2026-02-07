@@ -16,7 +16,7 @@ if (!OPENAI_API_KEY ) {
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v14 starting...');
+console.log('🚀 Realtime WebSocket Server v15 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -144,20 +144,20 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
         },
       }));
       
-      setTimeout(() => {
-        if (openaiWs.readyState === WebSocket.OPEN && !greetingSent) {
-          greetingSent = true;
-          console.log(`[OpenAI] 🎬 Starting greeting...`);
-          openaiWs.send(JSON.stringify({ type: 'response.create', response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } }));
-        }
-      }, 800);
-      
+      // v15: Greeting is sent via session.updated event handler (not setTimeout) to prevent duplication
       resolve({ openaiWs, useElevenLabs });
     });
 
     openaiWs.on('message', async (data) => {
       try {
         const response = JSON.parse(data.toString());
+        
+        // v15: Send greeting ONLY once, triggered by session.updated confirmation
+        if (response.type === 'session.updated' && !greetingSent) {
+          greetingSent = true;
+          console.log(`[OpenAI] 🎬 v15: Sending SINGLE greeting via session.updated`);
+          openaiWs.send(JSON.stringify({ type: 'response.create', response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } }));
+        }
         
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
           if (twilioWs.readyState === WebSocket.OPEN) {
@@ -243,7 +243,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '14.0.0',
+      version: '15.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
       voiceId: ELEVENLABS_VOICE_ID || 'N/A',
       activeSessions: activeSessions.size,
@@ -252,7 +252,7 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v14\n');
+  res.end('Realtime WebSocket Server v15\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -264,7 +264,7 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server v14 running on port ${PORT}`);
+  console.log(`✅ Server v15 running on port ${PORT}`);
   console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
   console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
   console.log('========================================');
