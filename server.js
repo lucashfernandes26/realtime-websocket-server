@@ -9,14 +9,14 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
-if (!OPENAI_API_KEY ) {
+if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is required');
   process.exit(1);
 }
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v15 starting...');
+console.log('🚀 Realtime WebSocket Server v16 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -53,7 +53,7 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
           text: text,
           model_id: 'eleven_turbo_v2_5',
           voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true },
-        } ),
+        }),
       }
     );
 
@@ -102,6 +102,7 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     });
 
     let greetingSent = false;
+    let greetingResponseDone = false;
     let fullResponse = '';
     let isProcessing = false;
 
@@ -129,6 +130,8 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
       const userPrompt = script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro.';
       const fullInstructions = `${userPrompt}${conversationRules}`;
       
+      // v16 FIX: Start with turn_detection DISABLED (null) to prevent VAD from auto-generating responses
+      // We will enable VAD after the greeting is complete
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -138,13 +141,12 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 700 },
+          turn_detection: null, // v16: DISABLED initially to prevent auto-response
           temperature: 0.7,
           max_response_output_tokens: 150,
         },
       }));
       
-      // v15: Greeting is sent via session.updated event handler (not setTimeout) to prevent duplication
       resolve({ openaiWs, useElevenLabs });
     });
 
@@ -152,11 +154,36 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
       try {
         const response = JSON.parse(data.toString());
         
-        // v15: Send greeting ONLY once, triggered by session.updated confirmation
+        // v16: Send greeting ONLY once when session is confirmed, with VAD disabled
         if (response.type === 'session.updated' && !greetingSent) {
           greetingSent = true;
-          console.log(`[OpenAI] 🎬 v15: Sending SINGLE greeting via session.updated`);
-          openaiWs.send(JSON.stringify({ type: 'response.create', response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } }));
+          console.log(`[OpenAI] 🎬 v16: Sending SINGLE greeting (VAD disabled, no auto-response possible)`);
+          openaiWs.send(JSON.stringify({ 
+            type: 'response.create', 
+            response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } 
+          }));
+        }
+        
+        // v16: After greeting response is DONE, re-enable VAD for normal conversation
+        if (response.type === 'response.done' && !greetingResponseDone) {
+          greetingResponseDone = true;
+          console.log(`[OpenAI] 🔄 v16: Greeting complete, enabling VAD for conversation`);
+          openaiWs.send(JSON.stringify({
+            type: 'session.update',
+            session: {
+              turn_detection: { 
+                type: 'server_vad', 
+                threshold: 0.5, 
+                prefix_padding_ms: 300, 
+                silence_duration_ms: 700 
+              },
+            },
+          }));
+        }
+        
+        // v16: Ignore the second session.updated (when VAD is re-enabled) - don't send another greeting
+        if (response.type === 'session.updated' && greetingSent) {
+          console.log(`[OpenAI] ℹ️ v16: session.updated received again (VAD re-enabled), ignoring`);
         }
         
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
@@ -243,7 +270,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '15.0.0',
+      version: '16.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
       voiceId: ELEVENLABS_VOICE_ID || 'N/A',
       activeSessions: activeSessions.size,
@@ -252,7 +279,7 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v15\n');
+  res.end('Realtime WebSocket Server v16\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -264,7 +291,7 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server v15 running on port ${PORT}`);
+  console.log(`✅ Server v16 running on port ${PORT}`);
   console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
   console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
   console.log('========================================');
