@@ -9,7 +9,6 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
-// Shared secret for webhook authentication (optional, set in Render env)
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 
 if (!OPENAI_API_KEY) {
@@ -19,7 +18,7 @@ if (!OPENAI_API_KEY) {
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v17 starting...');
+console.log('🚀 Realtime WebSocket Server v18 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -28,33 +27,29 @@ console.log('🎙️ Voice ID:', ELEVENLABS_VOICE_ID || 'N/A');
 const activeSessions = new Map();
 
 // ============================================================
-// INTEREST DETECTION KEYWORDS
-// Positive interest signals from the client
+// INTEREST DETECTION KEYWORDS (v18: Refined - removed overly generic words)
+// Only trigger on clear, unambiguous interest signals
 // ============================================================
 const POSITIVE_INTEREST_KEYWORDS = [
-  // Agendamento
-  'agendar', 'agenda', 'marcar', 'marque', 'agende',
-  'reunião', 'reuniao', 'meeting',
-  'horário', 'horario', 'disponível', 'disponivel',
-  'pode ser', 'vamos marcar', 'vamos agendar',
-  // Interesse
-  'tenho interesse', 'me interessa', 'interessante',
+  // Agendamento (strong signals)
+  'agendar', 'marcar reunião', 'marcar uma reunião', 'agende', 'marque',
+  'vamos marcar', 'vamos agendar',
+  // Interesse explícito (strong signals)
+  'tenho interesse', 'me interessa',
   'quero saber mais', 'saber mais', 'mais informações', 'mais informacoes',
   'me conte mais', 'como funciona',
-  'quero conhecer', 'quero ver', 'quero entender',
-  // Aceitação
-  'sim', 'claro', 'com certeza', 'pode ser', 'tá bom', 'ta bom',
-  'ok', 'beleza', 'perfeito', 'ótimo', 'otimo',
-  'vamos lá', 'vamos la', 'bora', 'fechado',
-  // Compra/contratação
+  'quero conhecer', 'quero entender',
+  // Compra/contratação (strong signals)
   'quero contratar', 'quero comprar', 'quanto custa',
   'qual o valor', 'qual o preço', 'qual o preco',
   'proposta', 'orçamento', 'orcamento',
-  'plano', 'pacote',
-  // Contato
-  'me liga', 'me ligue', 'pode ligar',
+  // Contato (strong signals)
   'meu email', 'meu telefone', 'meu whatsapp',
   'manda no whatsapp', 'envia por email',
+  'pode ligar de volta', 'me liga depois',
+  // Fechamento (strong signals)
+  'fechado', 'vamos lá', 'vamos la', 'bora',
+  'quero sim', 'com certeza quero',
 ];
 
 // Negative signals (to avoid false positives)
@@ -66,11 +61,15 @@ const NEGATIVE_KEYWORDS = [
   'desculpa', 'sem interesse',
   'tô ocupado', 'to ocupado',
   'agora não', 'agora nao',
-  'outro momento',
+  'outro momento', 'não é o momento',
+  'não me interessa', 'nao me interessa',
 ];
 
 function detectInterest(text) {
   const lowerText = text.toLowerCase().trim();
+  
+  // Ignore very short responses (less than 3 words) - too ambiguous
+  if (lowerText.split(/\s+/).length < 3) return { interested: false, signal: null };
   
   // Check negative first
   for (const neg of NEGATIVE_KEYWORDS) {
@@ -238,48 +237,54 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let greetingResponseDone = false;
     let fullResponse = '';
     let isProcessing = false;
-    let interestNotified = false; // v17: Track if we already sent interest notification
-    let transcriptionSaveTimer = null; // v17: Debounce timer for saving transcription
+    let interestNotified = false;
+    let transcriptionSaveTimer = null;
+    let userMessageCount = 0; // v18: Track user messages to require minimum interaction before interest detection
 
-    // v17: Schedule periodic transcription save (every 15 seconds during active call)
+    // Schedule periodic transcription save (every 15 seconds during active call)
     function scheduleTranscriptionSave() {
       if (transcriptionSaveTimer) clearTimeout(transcriptionSaveTimer);
       transcriptionSaveTimer = setTimeout(() => {
         if (sessionData.transcription.length > 0) {
           sendTranscriptionToBackend(callSid, sessionData.transcription, scriptId);
         }
-        // Reschedule if still active
         if (activeSessions.has(streamSid)) {
           scheduleTranscriptionSave();
         }
-      }, 15000); // Save every 15 seconds
+      }, 15000);
     }
 
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected`);
       
+      // v18: IMPROVED conversation rules - much more strict about following the script
       const conversationRules = `
 
-=== REGRAS DE CONVERSAÇÃO TELEFÔNICA ===
+=== REGRAS OBRIGATÓRIAS DE CONVERSAÇÃO TELEFÔNICA ===
 
-Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
+ATENÇÃO: Esta é uma LIGAÇÃO TELEFÔNICA REAL para um cliente. Você DEVE seguir estas regras rigorosamente:
 
-1. Se apresente com nome, empresa e motivo da ligação
-2. Termine a abertura com uma pergunta simples
-3. Fale no MÁXIMO 2 frases por vez
-4. Após fazer uma pergunta, PARE e ESPERE a resposta
-5. NUNCA faça duas perguntas seguidas
-6. NUNCA repita a abertura
-7. Seja natural e amigável
+1. SIGA O SCRIPT FORNECIDO ACIMA com precisão. O script define exatamente o que você deve dizer e como deve conduzir a conversa.
+2. Fale no MÁXIMO 2 frases curtas por vez. Frases longas são proibidas em ligações telefônicas.
+3. Após CADA pergunta que você fizer, PARE COMPLETAMENTE e ESPERE a resposta do cliente. NÃO continue falando.
+4. NUNCA faça duas perguntas na mesma fala. Uma pergunta por vez, sempre.
+5. NUNCA repita informações que já disse. Se já se apresentou, NÃO se apresente novamente.
+6. Seja NATURAL e CONVERSACIONAL. Fale como uma pessoa real, não como um robô.
+7. ADAPTE suas respostas ao que o cliente diz. Se ele fizer uma pergunta, responda PRIMEIRO antes de continuar o script.
+8. Se o cliente disser que não tem interesse, agradeça educadamente e encerre.
+9. NÃO invente informações que não estão no script. Se não sabe algo, diga que vai verificar.
+10. Use pausas naturais. Não fale rápido demais.
 
 === FIM DAS REGRAS ===
 
 `;
       
       const userPrompt = script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro.';
-      const fullInstructions = `${userPrompt}${conversationRules}`;
       
-      // v16 FIX: Start with turn_detection DISABLED (null) to prevent VAD from auto-generating responses
+      // v18: Put script FIRST, then rules, so the AI prioritizes the script content
+      const fullInstructions = `${userPrompt}\n\n${conversationRules}`;
+      
+      // Start with turn_detection DISABLED to prevent VAD from auto-generating responses
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -289,15 +294,13 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: null, // v16: DISABLED initially
-          temperature: 0.7,
-          max_response_output_tokens: 150,
+          turn_detection: null, // DISABLED initially
+          temperature: 0.6, // v18: Lower temperature for more consistent script following
+          max_response_output_tokens: 120, // v18: Shorter responses to keep it conversational
         },
       }));
       
-      // v17: Start periodic transcription saving
       scheduleTranscriptionSave();
-      
       resolve({ openaiWs, useElevenLabs });
     });
 
@@ -305,36 +308,36 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
       try {
         const response = JSON.parse(data.toString());
         
-        // v16: Send greeting ONLY once when session is confirmed
+        // Send greeting ONLY once when session is confirmed
         if (response.type === 'session.updated' && !greetingSent) {
           greetingSent = true;
-          console.log(`[OpenAI] 🎬 v16: Sending SINGLE greeting (VAD disabled)`);
+          console.log(`[OpenAI] 🎬 Sending SINGLE greeting (VAD disabled)`);
           openaiWs.send(JSON.stringify({ 
             type: 'response.create', 
             response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } 
           }));
         }
         
-        // v16: After greeting response is DONE, re-enable VAD
+        // After greeting response is DONE, re-enable VAD with LESS SENSITIVE settings
         if (response.type === 'response.done' && !greetingResponseDone) {
           greetingResponseDone = true;
-          console.log(`[OpenAI] 🔄 v16: Greeting complete, enabling VAD`);
+          console.log(`[OpenAI] 🔄 Greeting complete, enabling VAD (v18: less sensitive)`);
           openaiWs.send(JSON.stringify({
             type: 'session.update',
             session: {
               turn_detection: { 
                 type: 'server_vad', 
-                threshold: 0.5, 
-                prefix_padding_ms: 300, 
-                silence_duration_ms: 700 
+                threshold: 0.65,            // v18: Higher threshold (was 0.5) - less sensitive to noise
+                prefix_padding_ms: 500,     // v18: More padding (was 300) - waits longer before detecting speech
+                silence_duration_ms: 1200   // v18: Longer silence (was 700) - waits longer before responding
               },
             },
           }));
         }
         
-        // v16: Ignore second session.updated
+        // Ignore second session.updated (VAD re-enable confirmation)
         if (response.type === 'session.updated' && greetingSent) {
-          console.log(`[OpenAI] ℹ️ v16: session.updated (VAD re-enabled), ignoring`);
+          console.log(`[OpenAI] ℹ️ session.updated (VAD re-enabled), ignoring`);
         }
         
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
@@ -359,7 +362,7 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
           }
         }
 
-        // v17: Also capture assistant audio transcription (non-ElevenLabs mode)
+        // Also capture assistant audio transcription (non-ElevenLabs mode)
         if (response.type === 'response.audio_transcript.done' && !useElevenLabs) {
           const assistantText = response.transcript || '';
           if (assistantText.trim()) {
@@ -376,16 +379,16 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
           const userText = response.transcript || '';
           if (userText.trim()) {
-            console.log(`[User] 💬 "${userText}"`);
+            userMessageCount++;
+            console.log(`[User] 💬 [${userMessageCount}] "${userText}"`);
             sessionData.transcription.push({ role: 'user', text: userText, timestamp: new Date().toISOString() });
             
-            // v17: Check for positive interest signals from the client
-            if (!interestNotified) {
+            // v18: Only check interest after at least 2 user messages (avoid false positives from greetings)
+            if (!interestNotified && userMessageCount >= 2) {
               const { interested, signal } = detectInterest(userText);
               if (interested) {
                 interestNotified = true;
                 console.log(`[Interest] 🔔 Positive signal detected: "${signal}" from "${userText}"`);
-                // Send notification asynchronously (don't block the call)
                 sendInterestNotification(
                   callSid, 
                   sessionData.contactPhone || 'unknown', 
@@ -407,9 +410,7 @@ Esta é uma LIGAÇÃO TELEFÔNICA real. Siga estas regras:
     openaiWs.on('error', (error) => { console.error(`[OpenAI] ❌ Error:`, error.message); reject(error); });
     openaiWs.on('close', (code) => {
       console.log(`[OpenAI] Connection closed (code: ${code})`);
-      // v17: Clear transcription save timer
       if (transcriptionSaveTimer) clearTimeout(transcriptionSaveTimer);
-      // v17: Final transcription save on disconnect
       if (sessionData.transcription.length > 0) {
         console.log(`[Transcription] 📝 Final save for call ${callSid} (${sessionData.transcription.length} messages)`);
         sendTranscriptionToBackend(callSid, sessionData.transcription, scriptId);
@@ -435,9 +436,13 @@ function handleTwilioConnection(ws, req) {
         streamSid = data.start.streamSid;
         const callSid = data.start.callSid;
         const scriptId = data.start.customParameters?.scriptId || query.scriptId;
-        // v17: Extract contact phone from custom parameters or call data
-        sessionData.contactPhone = data.start.customParameters?.contactPhone || data.start.customParameters?.to || query.contactPhone || null;
-        console.log(`[Twilio] 🚀 Stream: ${streamSid}, Script: ${scriptId}, Phone: ${sessionData.contactPhone}`);
+        // v18: Extract contact phone from custom parameters, query, or Twilio call data
+        sessionData.contactPhone = data.start.customParameters?.contactPhone 
+          || data.start.customParameters?.to 
+          || query.contactPhone 
+          || data.start.customParameters?.From  // Twilio provides caller info
+          || null;
+        console.log(`[Twilio] 🚀 Stream: ${streamSid}, Call: ${callSid}, Script: ${scriptId}, Phone: ${sessionData.contactPhone}`);
         const result = await connectToOpenAI(ws, streamSid, callSid, scriptId, sessionData);
         openaiWs = result.openaiWs;
         activeSessions.set(streamSid, { twilioWs: ws, openaiWs, streamSid, startTime: new Date() });
@@ -460,7 +465,6 @@ function handleTwilioConnection(ws, req) {
 // HTTP SERVER + WEBSOCKET SERVER
 // ============================================================
 const server = createServer((req, res) => {
-  // CORS headers for API endpoints
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -475,7 +479,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '17.0.0',
+      version: '18.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
       voiceId: ELEVENLABS_VOICE_ID || 'N/A',
       activeSessions: activeSessions.size,
@@ -485,7 +489,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v17\n');
+  res.end('Realtime WebSocket Server v18\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -497,7 +501,7 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server v17 running on port ${PORT}`);
+  console.log(`✅ Server v18 running on port ${PORT}`);
   console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
   console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
   console.log(`🌐 API: ${API_BASE_URL}`);
