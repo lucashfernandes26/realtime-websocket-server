@@ -18,7 +18,7 @@ if (!OPENAI_API_KEY) {
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v18 starting...');
+console.log('🚀 Realtime WebSocket Server v19 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -27,32 +27,25 @@ console.log('🎙️ Voice ID:', ELEVENLABS_VOICE_ID || 'N/A');
 const activeSessions = new Map();
 
 // ============================================================
-// INTEREST DETECTION KEYWORDS (v18: Refined - removed overly generic words)
-// Only trigger on clear, unambiguous interest signals
+// INTEREST DETECTION KEYWORDS
 // ============================================================
 const POSITIVE_INTEREST_KEYWORDS = [
-  // Agendamento (strong signals)
   'agendar', 'marcar reunião', 'marcar uma reunião', 'agende', 'marque',
   'vamos marcar', 'vamos agendar',
-  // Interesse explícito (strong signals)
   'tenho interesse', 'me interessa',
   'quero saber mais', 'saber mais', 'mais informações', 'mais informacoes',
   'me conte mais', 'como funciona',
   'quero conhecer', 'quero entender',
-  // Compra/contratação (strong signals)
   'quero contratar', 'quero comprar', 'quanto custa',
   'qual o valor', 'qual o preço', 'qual o preco',
   'proposta', 'orçamento', 'orcamento',
-  // Contato (strong signals)
   'meu email', 'meu telefone', 'meu whatsapp',
   'manda no whatsapp', 'envia por email',
   'pode ligar de volta', 'me liga depois',
-  // Fechamento (strong signals)
   'fechado', 'vamos lá', 'vamos la', 'bora',
   'quero sim', 'com certeza quero',
 ];
 
-// Negative signals (to avoid false positives)
 const NEGATIVE_KEYWORDS = [
   'não tenho interesse', 'nao tenho interesse',
   'não quero', 'nao quero',
@@ -67,22 +60,15 @@ const NEGATIVE_KEYWORDS = [
 
 function detectInterest(text) {
   const lowerText = text.toLowerCase().trim();
-  
-  // Ignore very short responses (less than 3 words) - too ambiguous
   if (lowerText.split(/\s+/).length < 3) return { interested: false, signal: null };
-  
-  // Check negative first
   for (const neg of NEGATIVE_KEYWORDS) {
     if (lowerText.includes(neg)) return { interested: false, signal: null };
   }
-  
-  // Check positive signals
   for (const keyword of POSITIVE_INTEREST_KEYWORDS) {
     if (lowerText.includes(keyword)) {
       return { interested: true, signal: keyword };
     }
   }
-  
   return { interested: false, signal: null };
 }
 
@@ -181,7 +167,7 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
         body: JSON.stringify({
           text: text,
           model_id: 'eleven_turbo_v2_5',
-          voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true },
+          voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.15, use_speaker_boost: true },
         }),
       }
     );
@@ -239,9 +225,8 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let isProcessing = false;
     let interestNotified = false;
     let transcriptionSaveTimer = null;
-    let userMessageCount = 0; // v18: Track user messages to require minimum interaction before interest detection
+    let userMessageCount = 0;
 
-    // Schedule periodic transcription save (every 15 seconds during active call)
     function scheduleTranscriptionSave() {
       if (transcriptionSaveTimer) clearTimeout(transcriptionSaveTimer);
       transcriptionSaveTimer = setTimeout(() => {
@@ -257,31 +242,44 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected`);
       
-      // v18: IMPROVED conversation rules - much more strict about following the script
+      // v19: RAPPORT-FOCUSED conversation rules - warm, empathetic, natural
       const conversationRules = `
 
-=== REGRAS OBRIGATÓRIAS DE CONVERSAÇÃO TELEFÔNICA ===
+=== ESTILO DE COMUNICAÇÃO ===
 
-ATENÇÃO: Esta é uma LIGAÇÃO TELEFÔNICA REAL para um cliente. Você DEVE seguir estas regras rigorosamente:
+Você é uma SDR humana, simpática e acolhedora. Sua personalidade é calorosa e genuína.
 
-1. SIGA O SCRIPT FORNECIDO ACIMA com precisão. O script define exatamente o que você deve dizer e como deve conduzir a conversa.
-2. Fale no MÁXIMO 2 frases curtas por vez. Frases longas são proibidas em ligações telefônicas.
-3. Após CADA pergunta que você fizer, PARE COMPLETAMENTE e ESPERE a resposta do cliente. NÃO continue falando.
-4. NUNCA faça duas perguntas na mesma fala. Uma pergunta por vez, sempre.
-5. NUNCA repita informações que já disse. Se já se apresentou, NÃO se apresente novamente.
-6. Seja NATURAL e CONVERSACIONAL. Fale como uma pessoa real, não como um robô.
-7. ADAPTE suas respostas ao que o cliente diz. Se ele fizer uma pergunta, responda PRIMEIRO antes de continuar o script.
-8. Se o cliente disser que não tem interesse, agradeça educadamente e encerre.
-9. NÃO invente informações que não estão no script. Se não sabe algo, diga que vai verificar.
-10. Use pausas naturais. Não fale rápido demais.
+COMO VOCÊ FALA:
+- Fale com ENTUSIASMO e SIMPATIA genuína. Sorria ao falar (isso se reflete na voz).
+- Use expressões naturais brasileiras: "que legal!", "olha que bacana", "poxa, entendo", "nossa, que bom!", "com certeza!", "maravilha!"
+- Comece respostas com EMPATIA antes de ir ao ponto: "Que bom que você perguntou isso!", "Entendo perfeitamente sua preocupação", "Ótima pergunta!"
+- Chame a pessoa pelo nome quando souber. Isso cria conexão.
+- Faça pequenos comentários de rapport: "Imagino como deve ser corrido o dia a dia, né?", "Sei como é, a gente sempre quer o melhor pra empresa"
+- Use tom CONVERSACIONAL, como se estivesse falando com um conhecido. Nada de tom corporativo frio.
 
-=== FIM DAS REGRAS ===
+RITMO DA CONVERSA:
+- Responda de forma COMPLETA mas CONCISA. Não seja telegráfica nem prolixa.
+- Use no máximo 3 frases por resposta. Mas faça cada frase contar.
+- Após fazer uma pergunta, PARE e espere a resposta. Não faça duas perguntas seguidas.
+- Se o cliente responder algo curto ("sim", "não", "tá"), faça um comentário simpático antes de continuar: "Ótimo!", "Perfeito!", "Entendi!"
+- Quando o cliente fizer uma pergunta, RESPONDA com interesse genuíno antes de voltar ao script.
+
+O QUE NÃO FAZER:
+- NÃO seja robótica ou mecânica. Você é uma PESSOA, não uma máquina.
+- NÃO repita informações que já disse.
+- NÃO invente dados que não estão no script.
+- NÃO fale rápido demais. Mantenha um ritmo agradável.
+- NÃO ignore o que o cliente disse. Sempre reconheça a fala dele antes de continuar.
+
+OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está falando com uma IA. Gere CONFIANÇA e SIMPATIA.
+
+=== FIM DO ESTILO ===
 
 `;
       
-      const userPrompt = script?.systemPrompt || 'Você é um assistente prestativo que fala português brasileiro.';
+      const userPrompt = script?.systemPrompt || 'Você é uma assistente prestativa e simpática que fala português brasileiro com naturalidade.';
       
-      // v18: Put script FIRST, then rules, so the AI prioritizes the script content
+      // Script first, then rapport rules
       const fullInstructions = `${userPrompt}\n\n${conversationRules}`;
       
       // Start with turn_detection DISABLED to prevent VAD from auto-generating responses
@@ -295,8 +293,8 @@ ATENÇÃO: Esta é uma LIGAÇÃO TELEFÔNICA REAL para um cliente. Você DEVE se
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
           turn_detection: null, // DISABLED initially
-          temperature: 0.6, // v18: Lower temperature for more consistent script following
-          max_response_output_tokens: 120, // v18: Shorter responses to keep it conversational
+          temperature: 0.75, // v19: Higher temperature for more natural, varied responses
+          max_response_output_tokens: 200, // v19: Allow longer responses for rapport building
         },
       }));
       
@@ -311,25 +309,25 @@ ATENÇÃO: Esta é uma LIGAÇÃO TELEFÔNICA REAL para um cliente. Você DEVE se
         // Send greeting ONLY once when session is confirmed
         if (response.type === 'session.updated' && !greetingSent) {
           greetingSent = true;
-          console.log(`[OpenAI] 🎬 Sending SINGLE greeting (VAD disabled)`);
+          console.log(`[OpenAI] 🎬 Sending greeting (VAD disabled)`);
           openaiWs.send(JSON.stringify({ 
             type: 'response.create', 
             response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } 
           }));
         }
         
-        // After greeting response is DONE, re-enable VAD with LESS SENSITIVE settings
+        // After greeting response is DONE, re-enable VAD
         if (response.type === 'response.done' && !greetingResponseDone) {
           greetingResponseDone = true;
-          console.log(`[OpenAI] 🔄 Greeting complete, enabling VAD (v18: less sensitive)`);
+          console.log(`[OpenAI] 🔄 Greeting complete, enabling VAD (v19: balanced sensitivity)`);
           openaiWs.send(JSON.stringify({
             type: 'session.update',
             session: {
               turn_detection: { 
                 type: 'server_vad', 
-                threshold: 0.65,            // v18: Higher threshold (was 0.5) - less sensitive to noise
-                prefix_padding_ms: 500,     // v18: More padding (was 300) - waits longer before detecting speech
-                silence_duration_ms: 1200   // v18: Longer silence (was 700) - waits longer before responding
+                threshold: 0.55,            // v19: Balanced threshold - responsive but not too sensitive
+                prefix_padding_ms: 400,     // v19: Moderate padding
+                silence_duration_ms: 900    // v19: Balanced silence - responsive but gives time to think
               },
             },
           }));
@@ -383,7 +381,7 @@ ATENÇÃO: Esta é uma LIGAÇÃO TELEFÔNICA REAL para um cliente. Você DEVE se
             console.log(`[User] 💬 [${userMessageCount}] "${userText}"`);
             sessionData.transcription.push({ role: 'user', text: userText, timestamp: new Date().toISOString() });
             
-            // v18: Only check interest after at least 2 user messages (avoid false positives from greetings)
+            // Only check interest after at least 2 user messages
             if (!interestNotified && userMessageCount >= 2) {
               const { interested, signal } = detectInterest(userText);
               if (interested) {
@@ -436,11 +434,10 @@ function handleTwilioConnection(ws, req) {
         streamSid = data.start.streamSid;
         const callSid = data.start.callSid;
         const scriptId = data.start.customParameters?.scriptId || query.scriptId;
-        // v18: Extract contact phone from custom parameters, query, or Twilio call data
         sessionData.contactPhone = data.start.customParameters?.contactPhone 
           || data.start.customParameters?.to 
           || query.contactPhone 
-          || data.start.customParameters?.From  // Twilio provides caller info
+          || data.start.customParameters?.From
           || null;
         console.log(`[Twilio] 🚀 Stream: ${streamSid}, Call: ${callSid}, Script: ${scriptId}, Phone: ${sessionData.contactPhone}`);
         const result = await connectToOpenAI(ws, streamSid, callSid, scriptId, sessionData);
@@ -479,7 +476,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '18.0.0',
+      version: '19.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
       voiceId: ELEVENLABS_VOICE_ID || 'N/A',
       activeSessions: activeSessions.size,
@@ -489,7 +486,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v18\n');
+  res.end('Realtime WebSocket Server v19\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -501,7 +498,7 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server v18 running on port ${PORT}`);
+  console.log(`✅ Server v19 running on port ${PORT}`);
   console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
   console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
   console.log(`🌐 API: ${API_BASE_URL}`);
