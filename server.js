@@ -18,7 +18,7 @@ if (!OPENAI_API_KEY) {
 
 const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
 
-console.log('🚀 Realtime WebSocket Server v19 starting...');
+console.log('🚀 Realtime WebSocket Server v20 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
 console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
@@ -219,13 +219,25 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' },
     });
 
-    let greetingSent = false;
-    let greetingResponseDone = false;
+    // v20: ROBUST STATE MACHINE to prevent greeting duplication
+    const STATE = {
+      INIT: 'init',
+      SESSION_CONFIGURED: 'session_configured',
+      GREETING_REQUESTED: 'greeting_requested',
+      GREETING_IN_PROGRESS: 'greeting_in_progress',
+      GREETING_COMPLETE: 'greeting_complete',
+      VAD_ENABLING: 'vad_enabling',
+      CONVERSATION_ACTIVE: 'conversation_active',
+    };
+    
+    let currentState = STATE.INIT;
     let fullResponse = '';
     let isProcessing = false;
     let interestNotified = false;
     let transcriptionSaveTimer = null;
     let userMessageCount = 0;
+    let responseCount = 0; // Track total responses from OpenAI
+    let greetingResponseId = null; // Track the greeting response ID
 
     function scheduleTranscriptionSave() {
       if (transcriptionSaveTimer) clearTimeout(transcriptionSaveTimer);
@@ -242,7 +254,6 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     openaiWs.on('open', () => {
       console.log(`[OpenAI] ✅ Connected`);
       
-      // v19: RAPPORT-FOCUSED conversation rules - warm, empathetic, natural
       const conversationRules = `
 
 === ESTILO DE COMUNICAÇÃO ===
@@ -269,7 +280,6 @@ O QUE NÃO FAZER:
 - NÃO repita informações que já disse.
 - NÃO invente dados que não estão no script.
 - NÃO fale rápido demais. Mantenha um ritmo agradável.
-- NÃO ignore o que o cliente disse. Sempre reconheça a fala dele antes de continuar.
 
 OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está falando com uma IA. Gere CONFIANÇA e SIMPATIA.
 
@@ -278,11 +288,12 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
 `;
       
       const userPrompt = script?.systemPrompt || 'Você é uma assistente prestativa e simpática que fala português brasileiro com naturalidade.';
-      
-      // Script first, then rapport rules
       const fullInstructions = `${userPrompt}\n\n${conversationRules}`;
       
-      // Start with turn_detection DISABLED to prevent VAD from auto-generating responses
+      // v20: Start with VAD DISABLED - state machine controls the flow
+      currentState = STATE.INIT;
+      console.log(`[v20] 📊 State: ${currentState} → sending session.update`);
+      
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -292,9 +303,9 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: null, // DISABLED initially
-          temperature: 0.75, // v19: Higher temperature for more natural, varied responses
-          max_response_output_tokens: 200, // v19: Allow longer responses for rapport building
+          turn_detection: null, // DISABLED - will be enabled after greeting is FULLY done
+          temperature: 0.75,
+          max_response_output_tokens: 200,
         },
       }));
       
@@ -306,61 +317,74 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
       try {
         const response = JSON.parse(data.toString());
         
-        // Send greeting ONLY once when session is confirmed
-        if (response.type === 'session.updated' && !greetingSent) {
-          greetingSent = true;
-          console.log(`[OpenAI] 🎬 Sending greeting (VAD disabled)`);
-          openaiWs.send(JSON.stringify({ 
-            type: 'response.create', 
-            response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } 
-          }));
+        // ========== STATE: session.updated ==========
+        if (response.type === 'session.updated') {
+          if (currentState === STATE.INIT) {
+            // First session.updated = session configured, now send greeting
+            currentState = STATE.SESSION_CONFIGURED;
+            console.log(`[v20] 📊 State: ${currentState} → sending greeting`);
+            
+            currentState = STATE.GREETING_REQUESTED;
+            openaiWs.send(JSON.stringify({ 
+              type: 'response.create', 
+              response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } 
+            }));
+          } else if (currentState === STATE.VAD_ENABLING) {
+            // VAD re-enable confirmed, now in active conversation
+            currentState = STATE.CONVERSATION_ACTIVE;
+            console.log(`[v20] 📊 State: ${currentState} → conversation active, VAD enabled`);
+          } else {
+            // Any other session.updated is IGNORED
+            console.log(`[v20] ⚠️ Ignoring session.updated in state: ${currentState}`);
+          }
+          return; // IMPORTANT: return early to prevent any further processing
         }
         
-        // After greeting response is DONE, re-enable VAD
-        if (response.type === 'response.done' && !greetingResponseDone) {
-          greetingResponseDone = true;
-          console.log(`[OpenAI] 🔄 Greeting complete, enabling VAD (v19: balanced sensitivity)`);
-          openaiWs.send(JSON.stringify({
-            type: 'session.update',
-            session: {
-              turn_detection: { 
-                type: 'server_vad', 
-                threshold: 0.55,            // v19: Balanced threshold - responsive but not too sensitive
-                prefix_padding_ms: 400,     // v19: Moderate padding
-                silence_duration_ms: 900    // v19: Balanced silence - responsive but gives time to think
-              },
-            },
-          }));
+        // ========== STATE: response.created ==========
+        if (response.type === 'response.created') {
+          responseCount++;
+          const responseId = response.response?.id;
+          console.log(`[v20] 📊 Response #${responseCount} created (id: ${responseId}, state: ${currentState})`);
+          
+          if (currentState === STATE.GREETING_REQUESTED) {
+            // This is the greeting response
+            greetingResponseId = responseId;
+            currentState = STATE.GREETING_IN_PROGRESS;
+            console.log(`[v20] 📊 State: ${currentState} (greeting response id: ${greetingResponseId})`);
+          } else if (currentState === STATE.GREETING_IN_PROGRESS || currentState === STATE.GREETING_COMPLETE || currentState === STATE.VAD_ENABLING) {
+            // UNEXPECTED response during greeting phase - CANCEL IT
+            console.log(`[v20] 🚫 CANCELLING unexpected response #${responseCount} (id: ${responseId}) in state: ${currentState}`);
+            openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
+            return;
+          }
         }
         
-        // Ignore second session.updated (VAD re-enable confirmation)
-        if (response.type === 'session.updated' && greetingSent) {
-          console.log(`[OpenAI] ℹ️ session.updated (VAD re-enabled), ignoring`);
-        }
-        
+        // ========== AUDIO: Forward to Twilio (non-ElevenLabs mode) ==========
         if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
           if (twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: response.delta } }));
           }
         }
         
+        // ========== TEXT: Accumulate for ElevenLabs ==========
         if (response.type === 'response.text.delta' && response.delta && useElevenLabs) {
           fullResponse += response.delta;
         }
         
+        // ========== TEXT DONE: Send to ElevenLabs ==========
         if (response.type === 'response.text.done' && useElevenLabs) {
           const textToSpeak = fullResponse.trim();
           fullResponse = '';
           if (textToSpeak && !isProcessing) {
             isProcessing = true;
-            console.log(`[OpenAI] 📝 Full response: "${textToSpeak}"`);
+            console.log(`[v20] 📝 Response text: "${textToSpeak}" (state: ${currentState})`);
             sessionData.transcription.push({ role: 'assistant', text: textToSpeak, timestamp: new Date().toISOString() });
             await textToSpeechElevenLabs(textToSpeak, twilioWs, streamSid);
             isProcessing = false;
           }
         }
 
-        // Also capture assistant audio transcription (non-ElevenLabs mode)
+        // ========== AUDIO TRANSCRIPT DONE (non-ElevenLabs) ==========
         if (response.type === 'response.audio_transcript.done' && !useElevenLabs) {
           const assistantText = response.transcript || '';
           if (assistantText.trim()) {
@@ -369,19 +393,59 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
           }
         }
         
-        if (response.type === 'input_audio_buffer.speech_started') {
-          console.log(`[User] 🎤 Speaking...`);
-          if (twilioWs.readyState === WebSocket.OPEN) twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
+        // ========== RESPONSE DONE: Check if greeting is complete ==========
+        if (response.type === 'response.done') {
+          const responseId = response.response?.id;
+          console.log(`[v20] 📊 Response done (id: ${responseId}, state: ${currentState})`);
+          
+          if (currentState === STATE.GREETING_IN_PROGRESS) {
+            // Greeting is complete! Now wait a moment, then enable VAD
+            currentState = STATE.GREETING_COMPLETE;
+            console.log(`[v20] 📊 State: ${currentState} → waiting 1.5s before enabling VAD`);
+            
+            // v20: DELAY before enabling VAD to ensure ElevenLabs has finished playing
+            setTimeout(() => {
+              if (currentState === STATE.GREETING_COMPLETE) {
+                currentState = STATE.VAD_ENABLING;
+                console.log(`[v20] 📊 State: ${currentState} → enabling VAD now`);
+                openaiWs.send(JSON.stringify({
+                  type: 'session.update',
+                  session: {
+                    turn_detection: { 
+                      type: 'server_vad', 
+                      threshold: 0.55,
+                      prefix_padding_ms: 400,
+                      silence_duration_ms: 900
+                    },
+                  },
+                }));
+              } else {
+                console.log(`[v20] ⚠️ State changed during VAD delay, skipping VAD enable (state: ${currentState})`);
+              }
+            }, 1500);
+          }
+          // For non-greeting responses (during conversation), do nothing special
         }
         
+        // ========== USER SPEECH STARTED ==========
+        if (response.type === 'input_audio_buffer.speech_started') {
+          console.log(`[User] 🎤 Speaking... (state: ${currentState})`);
+          // Only clear audio if in conversation mode
+          if (currentState === STATE.CONVERSATION_ACTIVE) {
+            if (twilioWs.readyState === WebSocket.OPEN) {
+              twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
+            }
+          }
+        }
+        
+        // ========== USER TRANSCRIPTION ==========
         if (response.type === 'conversation.item.input_audio_transcription.completed') {
           const userText = response.transcript || '';
           if (userText.trim()) {
             userMessageCount++;
-            console.log(`[User] 💬 [${userMessageCount}] "${userText}"`);
+            console.log(`[User] 💬 [${userMessageCount}] "${userText}" (state: ${currentState})`);
             sessionData.transcription.push({ role: 'user', text: userText, timestamp: new Date().toISOString() });
             
-            // Only check interest after at least 2 user messages
             if (!interestNotified && userMessageCount >= 2) {
               const { interested, signal } = detectInterest(userText);
               if (interested) {
@@ -399,7 +463,24 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
           }
         }
         
-        if (response.type === 'error') console.error(`[OpenAI] ❌ Error:`, response.error);
+        if (response.type === 'error') {
+          console.error(`[OpenAI] ❌ Error:`, response.error);
+          // If error during greeting, try to recover
+          if (currentState === STATE.GREETING_REQUESTED || currentState === STATE.GREETING_IN_PROGRESS) {
+            console.log(`[v20] ⚠️ Error during greeting, attempting recovery`);
+            currentState = STATE.GREETING_COMPLETE;
+            // Enable VAD anyway so conversation can proceed
+            setTimeout(() => {
+              currentState = STATE.VAD_ENABLING;
+              openaiWs.send(JSON.stringify({
+                type: 'session.update',
+                session: {
+                  turn_detection: { type: 'server_vad', threshold: 0.55, prefix_padding_ms: 400, silence_duration_ms: 900 },
+                },
+              }));
+            }, 1000);
+          }
+        }
       } catch (error) {
         console.error(`[OpenAI] Parse error:`, error.message);
       }
@@ -476,7 +557,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '19.0.0',
+      version: '20.0.0',
       voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
       voiceId: ELEVENLABS_VOICE_ID || 'N/A',
       activeSessions: activeSessions.size,
@@ -486,7 +567,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v19\n');
+  res.end('Realtime WebSocket Server v20\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -498,7 +579,7 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`✅ Server v19 running on port ${PORT}`);
+  console.log(`✅ Server v20 running on port ${PORT}`);
   console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
   console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
   console.log(`🌐 API: ${API_BASE_URL}`);
