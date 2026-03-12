@@ -12,7 +12,7 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-console.log('Realtime WebSocket Server v23 starting...');
+console.log('Realtime WebSocket Server v23.1 starting...');
 console.log('Port:', PORT);
 console.log('API Base URL:', API_BASE_URL);
 
@@ -258,7 +258,7 @@ OBJETIVO: Criar uma conversa tão natural e agradável que o cliente queira cont
         session: {
           modalities: ['text', 'audio'],
           instructions: fullInstructions,
-          voice: 'coral',
+          voice: 'shimmer',
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
@@ -509,9 +509,9 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '23.0.0',
+      version: '23.1.0',
       voiceProvider: 'OpenAI Native',
-      voiceId: 'coral',
+      voiceId: 'shimmer',
       activeSessions: activeSessions.size,
       uptime: Math.round(process.uptime()),
     }));
@@ -519,7 +519,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v23\n');
+  res.end('Realtime WebSocket Server v23.1\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -535,8 +535,8 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`Server v23 running on port ${PORT}`);
-  console.log(`Voice: OpenAI Native (coral)`);
+  console.log(`Server v23.1 running on port ${PORT}`);
+  console.log(`Voice: OpenAI Native (shimmer)`);
   console.log(`API: ${API_BASE_URL}`);
   console.log('========================================');
 });
