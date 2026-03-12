@@ -14,7 +14,7 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-console.log('Realtime WebSocket Server v22.1 starting...');
+console.log('Realtime WebSocket Server v22.2 starting...');
 console.log('Port:', PORT);
 console.log('API Base URL:', API_BASE_URL);
 
@@ -158,6 +158,10 @@ function handleTwilioConnection(ws, req) {
   let audioChunksSent = 0;
   let audioChunksReceived = 0;
 
+  // v22.2: Audio buffer for chunks that arrive before streamSid is set
+  let pendingAudioBuffer = [];
+  let pendingItemId = null;
+
   // v22: Connect to OpenAI immediately (don't wait for start event)
   // This reduces latency by having the OpenAI connection ready
   const openAiWs = new WebSocket(OPENAI_REALTIME_URL, {
@@ -171,6 +175,28 @@ function handleTwilioConnection(ws, req) {
   let sessionConfigured = false;
   let greetingSent = false;
   let vadEnabled = false;
+
+  // v22.2: Flush buffered audio when streamSid becomes available
+  function flushPendingAudio() {
+    if (pendingAudioBuffer.length > 0 && streamSid && ws.readyState === WebSocket.OPEN) {
+      console.log(`[Audio] Flushing ${pendingAudioBuffer.length} buffered chunks to Twilio (streamSid: ${streamSid})`);
+      for (const payload of pendingAudioBuffer) {
+        ws.send(JSON.stringify({
+          event: 'media',
+          streamSid: streamSid,
+          media: { payload },
+        }));
+        audioChunksSent++;
+      }
+      // Set the last assistant item for interruption handling
+      if (pendingItemId) {
+        lastAssistantItem = pendingItemId;
+      }
+      sendMark();
+      pendingAudioBuffer = [];
+      pendingItemId = null;
+    }
+  }
 
   function scheduleTranscriptionSave() {
     if (transcriptionSaveTimer) clearTimeout(transcriptionSaveTimer);
@@ -322,15 +348,15 @@ OBJETIVO: Criar uma conversa tão natural e agradável que o cliente queira cont
       }
 
       // ========== AUDIO DELTA: Forward to Twilio ==========
-      // v22: Handle BOTH old and new event names for compatibility
+      // v22.2: Buffer audio if streamSid not yet available, flush when it arrives
       if ((response.type === 'response.audio.delta' || response.type === 'response.output_audio.delta') && response.delta) {
         if (streamSid && ws.readyState === WebSocket.OPEN) {
-          const audioDelta = {
+          // streamSid available - send directly
+          ws.send(JSON.stringify({
             event: 'media',
             streamSid: streamSid,
             media: { payload: response.delta },
-          };
-          ws.send(JSON.stringify(audioDelta));
+          }));
           audioChunksSent++;
 
           // Track timing for interruption handling
@@ -351,8 +377,11 @@ OBJETIVO: Criar uma conversa tão natural e agradável que o cliente queira cont
             console.log(`[Audio] ${audioChunksSent} chunks sent to Twilio`);
           }
         } else {
-          if (audioChunksSent === 0) {
-            console.log(`[Audio] WARNING: Audio received but cannot send - streamSid: ${streamSid}, wsState: ${ws.readyState}`);
+          // v22.2: Buffer audio until streamSid arrives
+          pendingAudioBuffer.push(response.delta);
+          if (response.item_id) pendingItemId = response.item_id;
+          if (pendingAudioBuffer.length === 1) {
+            console.log(`[Audio] Buffering audio (streamSid not yet available)`);
           }
         }
       }
@@ -479,6 +508,9 @@ OBJETIVO: Criar uma conversa tão natural e agradável que o cliente queira cont
           console.log(`[Twilio] Stream started: ${streamSid}, Call: ${callSid}, Script: ${scriptId}, Phone: ${sessionData.contactPhone}`);
           activeSessions.set(streamSid, { twilioWs: ws, openaiWs: openAiWs, streamSid, startTime: new Date() });
           
+          // v22.2: Flush any buffered audio now that streamSid is available
+          flushPendingAudio();
+          
           // v22: If we got a new scriptId, reconfigure the session with the correct script
           if (startScriptId && !scriptData) {
             fetchScript(startScriptId).then((script) => {
@@ -561,7 +593,7 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '22.1.0',
+      version: '22.2.0',
       voiceProvider: 'OpenAI Native',
       voiceId: 'coral',
       activeSessions: activeSessions.size,
@@ -571,7 +603,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v22.1\n');
+  res.end('Realtime WebSocket Server v22.2\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -587,7 +619,7 @@ wss.on('connection', (ws, req) => {
 
 server.listen(PORT, () => {
   console.log('========================================');
-  console.log(`Server v22.1 running on port ${PORT}`);
+  console.log(`Server v22.2 running on port ${PORT}`);
   console.log(`Voice: OpenAI Native (coral)`);
   console.log(`API: ${API_BASE_URL}`);
   console.log('========================================');
