@@ -16,13 +16,34 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const USE_ELEVENLABS = !!ELEVENLABS_API_KEY && !!ELEVENLABS_VOICE_ID;
+// v21: Check ElevenLabs availability at startup
+let elevenLabsAvailable = false;
+async function checkElevenLabs() {
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+    console.log('⚠️ ElevenLabs not configured, using OpenAI native audio');
+    return false;
+  }
+  try {
+    const resp = await fetch('https://api.elevenlabs.io/v1/user', {
+      headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+    });
+    if (resp.ok) {
+      const userData = await resp.json();
+      console.log(`✅ ElevenLabs API key valid. Subscription: ${userData.subscription?.tier || 'unknown'}`);
+      return true;
+    } else {
+      console.error(`❌ ElevenLabs API key invalid (${resp.status}). Falling back to OpenAI native audio.`);
+      return false;
+    }
+  } catch (e) {
+    console.error(`❌ ElevenLabs check failed: ${e.message}. Falling back to OpenAI native audio.`);
+    return false;
+  }
+}
 
-console.log('🚀 Realtime WebSocket Server v20 starting...');
+console.log('🚀 Realtime WebSocket Server v21 starting...');
 console.log('📍 Port:', PORT);
 console.log('🌐 API Base URL:', API_BASE_URL);
-console.log('🎤 Voice Provider:', USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI');
-console.log('🎙️ Voice ID:', ELEVENLABS_VOICE_ID || 'N/A');
 
 const activeSessions = new Map();
 
@@ -148,7 +169,7 @@ async function fetchScript(scriptId) {
 }
 
 // ============================================================
-// ELEVENLABS TEXT-TO-SPEECH
+// ELEVENLABS TEXT-TO-SPEECH (with fallback detection)
 // ============================================================
 async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
   try {
@@ -175,6 +196,8 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`[ElevenLabs] ❌ Error ${response.status}: ${errorText}`);
+      // v21: Mark ElevenLabs as unavailable for future calls
+      elevenLabsAvailable = false;
       return false;
     }
 
@@ -195,6 +218,7 @@ async function textToSpeechElevenLabs(text, twilioWs, streamSid) {
     return true;
   } catch (error) {
     console.error(`[ElevenLabs] ❌ Error:`, error.message);
+    elevenLabsAvailable = false;
     return false;
   }
 }
@@ -212,14 +236,15 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
       if (script) console.log(`[OpenAI] ✅ Script loaded: ${script.name}`);
     }
     
-    const useElevenLabs = USE_ELEVENLABS;
-    console.log(`[OpenAI] Using ElevenLabs: ${useElevenLabs}`);
+    // v21: Decide voice mode based on ElevenLabs availability
+    const useElevenLabs = elevenLabsAvailable;
+    console.log(`[v21] Voice mode: ${useElevenLabs ? 'ElevenLabs (text→TTS)' : 'OpenAI Native (direct audio)'}`);
     
     const openaiWs = new WebSocket(OPENAI_REALTIME_URL, {
       headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' },
     });
 
-    // v20: ROBUST STATE MACHINE to prevent greeting duplication
+    // v21: ROBUST STATE MACHINE
     const STATE = {
       INIT: 'init',
       SESSION_CONFIGURED: 'session_configured',
@@ -236,8 +261,10 @@ function connectToOpenAI(twilioWs, streamSid, callSid, scriptId, sessionData) {
     let interestNotified = false;
     let transcriptionSaveTimer = null;
     let userMessageCount = 0;
-    let responseCount = 0; // Track total responses from OpenAI
-    let greetingResponseId = null; // Track the greeting response ID
+    let responseCount = 0;
+    let greetingResponseId = null;
+    // v21: Track if we need to switch from ElevenLabs to OpenAI mid-session
+    let sessionUseElevenLabs = useElevenLabs;
 
     function scheduleTranscriptionSave() {
       if (transcriptionSaveTimer) clearTimeout(transcriptionSaveTimer);
@@ -272,7 +299,7 @@ RITMO DA CONVERSA:
 - Responda de forma COMPLETA mas CONCISA. Não seja telegráfica nem prolixa.
 - Use no máximo 3 frases por resposta. Mas faça cada frase contar.
 - Após fazer uma pergunta, PARE e espere a resposta. Não faça duas perguntas seguidas.
-- Se o cliente responder algo curto ("sim", "não", "tá"), faça um comentário simpático antes de continuar: "Ótimo!", "Perfeito!", "Entendi!"
+- Se o cliente responder algo curto ("sim", "não", "tá"), faça um comentário empático antes de continuar.
 - Quando o cliente fizer uma pergunta, RESPONDA com interesse genuíno antes de voltar ao script.
 
 O QUE NÃO FAZER:
@@ -290,27 +317,31 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
       const userPrompt = script?.systemPrompt || 'Você é uma assistente prestativa e simpática que fala português brasileiro com naturalidade.';
       const fullInstructions = `${userPrompt}\n\n${conversationRules}`;
       
-      // v20: Start with VAD DISABLED - state machine controls the flow
+      // v21: Configure modalities based on voice provider
+      // If using ElevenLabs: text only (we convert text→speech via ElevenLabs API)
+      // If using OpenAI native: text + audio (OpenAI generates audio directly)
+      const modalities = sessionUseElevenLabs ? ['text'] : ['text', 'audio'];
+      
       currentState = STATE.INIT;
-      console.log(`[v20] 📊 State: ${currentState} → sending session.update`);
+      console.log(`[v21] 📊 State: ${currentState} → sending session.update (modalities: ${modalities.join(',')})`);
       
       openaiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
-          modalities: useElevenLabs ? ['text'] : ['text', 'audio'],
+          modalities: modalities,
           instructions: fullInstructions,
           voice: 'shimmer',
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
           input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: null, // DISABLED - will be enabled after greeting is FULLY done
+          turn_detection: null, // DISABLED - will be enabled after greeting
           temperature: 0.75,
           max_response_output_tokens: 200,
         },
       }));
       
       scheduleTranscriptionSave();
-      resolve({ openaiWs, useElevenLabs });
+      resolve({ openaiWs, useElevenLabs: sessionUseElevenLabs });
     });
 
     openaiWs.on('message', async (data) => {
@@ -320,94 +351,103 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
         // ========== STATE: session.updated ==========
         if (response.type === 'session.updated') {
           if (currentState === STATE.INIT) {
-            // First session.updated = session configured, now send greeting
             currentState = STATE.SESSION_CONFIGURED;
-            console.log(`[v20] 📊 State: ${currentState} → sending greeting`);
+            console.log(`[v21] 📊 State: ${currentState} → sending greeting`);
             
             currentState = STATE.GREETING_REQUESTED;
+            const greetingModalities = sessionUseElevenLabs ? ['text'] : ['text', 'audio'];
             openaiWs.send(JSON.stringify({ 
               type: 'response.create', 
-              response: { modalities: useElevenLabs ? ['text'] : ['text', 'audio'] } 
+              response: { modalities: greetingModalities } 
             }));
           } else if (currentState === STATE.VAD_ENABLING) {
-            // VAD re-enable confirmed, now in active conversation
             currentState = STATE.CONVERSATION_ACTIVE;
-            console.log(`[v20] 📊 State: ${currentState} → conversation active, VAD enabled`);
+            console.log(`[v21] 📊 State: ${currentState} → conversation active, VAD enabled`);
           } else {
-            // Any other session.updated is IGNORED
-            console.log(`[v20] ⚠️ Ignoring session.updated in state: ${currentState}`);
+            console.log(`[v21] ⚠️ Ignoring session.updated in state: ${currentState}`);
           }
-          return; // IMPORTANT: return early to prevent any further processing
+          return;
         }
         
         // ========== STATE: response.created ==========
         if (response.type === 'response.created') {
           responseCount++;
           const responseId = response.response?.id;
-          console.log(`[v20] 📊 Response #${responseCount} created (id: ${responseId}, state: ${currentState})`);
+          console.log(`[v21] 📊 Response #${responseCount} created (id: ${responseId}, state: ${currentState})`);
           
           if (currentState === STATE.GREETING_REQUESTED) {
-            // This is the greeting response
             greetingResponseId = responseId;
             currentState = STATE.GREETING_IN_PROGRESS;
-            console.log(`[v20] 📊 State: ${currentState} (greeting response id: ${greetingResponseId})`);
+            console.log(`[v21] 📊 State: ${currentState} (greeting response id: ${greetingResponseId})`);
           } else if (currentState === STATE.GREETING_IN_PROGRESS || currentState === STATE.GREETING_COMPLETE || currentState === STATE.VAD_ENABLING) {
-            // UNEXPECTED response during greeting phase - CANCEL IT
-            console.log(`[v20] 🚫 CANCELLING unexpected response #${responseCount} (id: ${responseId}) in state: ${currentState}`);
+            console.log(`[v21] 🚫 CANCELLING unexpected response #${responseCount} in state: ${currentState}`);
             openaiWs.send(JSON.stringify({ type: 'response.cancel' }));
             return;
           }
         }
         
-        // ========== AUDIO: Forward to Twilio (non-ElevenLabs mode) ==========
-        if (response.type === 'response.audio.delta' && response.delta && !useElevenLabs) {
+        // ========== AUDIO: Forward OpenAI native audio to Twilio ==========
+        if (response.type === 'response.audio.delta' && response.delta && !sessionUseElevenLabs) {
           if (twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: response.delta } }));
           }
         }
         
         // ========== TEXT: Accumulate for ElevenLabs ==========
-        if (response.type === 'response.text.delta' && response.delta && useElevenLabs) {
+        if (response.type === 'response.text.delta' && response.delta && sessionUseElevenLabs) {
           fullResponse += response.delta;
         }
         
         // ========== TEXT DONE: Send to ElevenLabs ==========
-        if (response.type === 'response.text.done' && useElevenLabs) {
+        if (response.type === 'response.text.done' && sessionUseElevenLabs) {
           const textToSpeak = fullResponse.trim();
           fullResponse = '';
           if (textToSpeak && !isProcessing) {
             isProcessing = true;
-            console.log(`[v20] 📝 Response text: "${textToSpeak}" (state: ${currentState})`);
+            console.log(`[v21] 📝 Response text: "${textToSpeak}" (state: ${currentState})`);
             sessionData.transcription.push({ role: 'assistant', text: textToSpeak, timestamp: new Date().toISOString() });
-            await textToSpeechElevenLabs(textToSpeak, twilioWs, streamSid);
+            
+            const success = await textToSpeechElevenLabs(textToSpeak, twilioWs, streamSid);
+            
+            // v21: If ElevenLabs failed, switch to OpenAI native for the REST of this session
+            if (!success) {
+              console.log(`[v21] ⚠️ ElevenLabs failed! Switching to OpenAI native audio for this session.`);
+              sessionUseElevenLabs = false;
+              // Reconfigure session to use audio modality
+              openaiWs.send(JSON.stringify({
+                type: 'session.update',
+                session: {
+                  modalities: ['text', 'audio'],
+                },
+              }));
+            }
+            
             isProcessing = false;
           }
         }
 
-        // ========== AUDIO TRANSCRIPT DONE (non-ElevenLabs) ==========
-        if (response.type === 'response.audio_transcript.done' && !useElevenLabs) {
+        // ========== AUDIO TRANSCRIPT DONE (OpenAI native mode) ==========
+        if (response.type === 'response.audio_transcript.done' && !sessionUseElevenLabs) {
           const assistantText = response.transcript || '';
           if (assistantText.trim()) {
-            console.log(`[ZENIX] 🤖 "${assistantText}"`);
+            console.log(`[v21] 🤖 "${assistantText}"`);
             sessionData.transcription.push({ role: 'assistant', text: assistantText, timestamp: new Date().toISOString() });
           }
         }
         
-        // ========== RESPONSE DONE: Check if greeting is complete ==========
+        // ========== RESPONSE DONE ==========
         if (response.type === 'response.done') {
           const responseId = response.response?.id;
-          console.log(`[v20] 📊 Response done (id: ${responseId}, state: ${currentState})`);
+          console.log(`[v21] 📊 Response done (id: ${responseId}, state: ${currentState})`);
           
           if (currentState === STATE.GREETING_IN_PROGRESS) {
-            // Greeting is complete! Now wait a moment, then enable VAD
             currentState = STATE.GREETING_COMPLETE;
-            console.log(`[v20] 📊 State: ${currentState} → waiting 1.5s before enabling VAD`);
+            console.log(`[v21] 📊 State: ${currentState} → waiting 1.5s before enabling VAD`);
             
-            // v20: DELAY before enabling VAD to ensure ElevenLabs has finished playing
             setTimeout(() => {
               if (currentState === STATE.GREETING_COMPLETE) {
                 currentState = STATE.VAD_ENABLING;
-                console.log(`[v20] 📊 State: ${currentState} → enabling VAD now`);
+                console.log(`[v21] 📊 State: ${currentState} → enabling VAD now`);
                 openaiWs.send(JSON.stringify({
                   type: 'session.update',
                   session: {
@@ -420,17 +460,15 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
                   },
                 }));
               } else {
-                console.log(`[v20] ⚠️ State changed during VAD delay, skipping VAD enable (state: ${currentState})`);
+                console.log(`[v21] ⚠️ State changed during VAD delay, skipping (state: ${currentState})`);
               }
             }, 1500);
           }
-          // For non-greeting responses (during conversation), do nothing special
         }
         
         // ========== USER SPEECH STARTED ==========
         if (response.type === 'input_audio_buffer.speech_started') {
-          console.log(`[User] 🎤 Speaking... (state: ${currentState})`);
-          // Only clear audio if in conversation mode
+          console.log(`[v21] 🎤 User speaking... (state: ${currentState})`);
           if (currentState === STATE.CONVERSATION_ACTIVE) {
             if (twilioWs.readyState === WebSocket.OPEN) {
               twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
@@ -443,21 +481,15 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
           const userText = response.transcript || '';
           if (userText.trim()) {
             userMessageCount++;
-            console.log(`[User] 💬 [${userMessageCount}] "${userText}" (state: ${currentState})`);
+            console.log(`[v21] 💬 User [${userMessageCount}]: "${userText}" (state: ${currentState})`);
             sessionData.transcription.push({ role: 'user', text: userText, timestamp: new Date().toISOString() });
             
             if (!interestNotified && userMessageCount >= 2) {
               const { interested, signal } = detectInterest(userText);
               if (interested) {
                 interestNotified = true;
-                console.log(`[Interest] 🔔 Positive signal detected: "${signal}" from "${userText}"`);
-                sendInterestNotification(
-                  callSid, 
-                  sessionData.contactPhone || 'unknown', 
-                  signal, 
-                  sessionData.transcription,
-                  scriptId
-                );
+                console.log(`[Interest] 🔔 Positive signal: "${signal}"`);
+                sendInterestNotification(callSid, sessionData.contactPhone || 'unknown', signal, sessionData.transcription, scriptId);
               }
             }
           }
@@ -465,11 +497,9 @@ OBJETIVO: Criar uma conversa tão natural que o cliente nem perceba que está fa
         
         if (response.type === 'error') {
           console.error(`[OpenAI] ❌ Error:`, response.error);
-          // If error during greeting, try to recover
           if (currentState === STATE.GREETING_REQUESTED || currentState === STATE.GREETING_IN_PROGRESS) {
-            console.log(`[v20] ⚠️ Error during greeting, attempting recovery`);
+            console.log(`[v21] ⚠️ Error during greeting, recovering...`);
             currentState = STATE.GREETING_COMPLETE;
-            // Enable VAD anyway so conversation can proceed
             setTimeout(() => {
               currentState = STATE.VAD_ENABLING;
               openaiWs.send(JSON.stringify({
@@ -557,9 +587,9 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
-      version: '20.0.0',
-      voiceProvider: USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI',
-      voiceId: ELEVENLABS_VOICE_ID || 'N/A',
+      version: '21.0.0',
+      voiceProvider: elevenLabsAvailable ? 'ElevenLabs' : 'OpenAI Native',
+      voiceId: elevenLabsAvailable ? ELEVENLABS_VOICE_ID : 'shimmer',
       activeSessions: activeSessions.size,
       uptime: Math.round(process.uptime()),
     }));
@@ -567,7 +597,7 @@ const server = createServer((req, res) => {
   }
   
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Realtime WebSocket Server v20\n');
+  res.end('Realtime WebSocket Server v21\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -577,13 +607,19 @@ wss.on('connection', (ws, req) => {
   else ws.close();
 });
 
-server.listen(PORT, () => {
-  console.log('========================================');
-  console.log(`✅ Server v20 running on port ${PORT}`);
-  console.log(`🎤 Voice: ${USE_ELEVENLABS ? 'ElevenLabs' : 'OpenAI'}`);
-  console.log(`🎙️ Voice ID: ${ELEVENLABS_VOICE_ID || 'N/A'}`);
-  console.log(`🌐 API: ${API_BASE_URL}`);
-  console.log('========================================');
+// v21: Check ElevenLabs at startup, then start server
+checkElevenLabs().then((available) => {
+  elevenLabsAvailable = available;
+  console.log(`🎤 Voice Provider: ${elevenLabsAvailable ? 'ElevenLabs' : 'OpenAI Native'}`);
+  console.log(`🎙️ Voice: ${elevenLabsAvailable ? ELEVENLABS_VOICE_ID : 'shimmer (OpenAI)'}`);
+  
+  server.listen(PORT, () => {
+    console.log('========================================');
+    console.log(`✅ Server v21 running on port ${PORT}`);
+    console.log(`🎤 Voice: ${elevenLabsAvailable ? 'ElevenLabs' : 'OpenAI Native'}`);
+    console.log(`🌐 API: ${API_BASE_URL}`);
+    console.log('========================================');
+  });
 });
 
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
